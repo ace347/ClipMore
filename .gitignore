@@ -27,6 +27,10 @@ fallback_exports/*.mp4
 fallback_exports/*.wav
 !fallback_exports/.gitkeep
 
+# Manual clips and live stream recordings (can be many GB)
+manual_exports/*.mp4
+live_sessions/
+
 # System & Editor files
 .vscode/
 .idea/

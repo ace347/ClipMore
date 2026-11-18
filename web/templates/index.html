@@ -8,6 +8,8 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Lucide Icons CDN -->
   <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- hls.js: plays the growing live recording in the Manual Clip player -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
     body {
@@ -103,6 +105,10 @@
         <button id="tab-btn-fallback" onclick="switchTab('fallback')" class="flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition text-gray-400 hover:text-gray-200">
           <i data-lucide="zap" class="w-4 h-4"></i>
           <span>Fallback DSP Clipper (0 AI Tokens)</span>
+        </button>
+        <button id="tab-btn-manual" onclick="switchTab('manual')" class="flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition text-gray-400 hover:text-gray-200">
+          <i data-lucide="scissors" class="w-4 h-4"></i>
+          <span>Manual Clip</span>
         </button>
       </div>
 
@@ -208,6 +214,136 @@
         </div>
       </div>
 
+      <!-- Tab 3: Manual Clip Panel -->
+      <div id="tab-content-manual" class="glass rounded-2xl p-6 space-y-5 hidden">
+        <div>
+          <div class="flex items-center justify-between">
+            <h2 class="text-base font-bold text-white flex items-center space-x-2">
+              <i data-lucide="scissors" class="w-4 h-4 text-violet-400"></i>
+              <span>Manual Clip</span>
+            </h2>
+            <span class="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full bg-violet-500/10 text-violet-400 border border-violet-500/20">You pick the moment</span>
+          </div>
+          <p class="text-xs text-gray-400 mt-0.5">Paste a live stream link (or open a video file), mark where your clip starts and ends, then export it as a 9:16 short.</p>
+        </div>
+
+        <!-- File picker -->
+        <div class="space-y-2">
+          <label class="block text-xs font-semibold text-gray-300">Stream link or video file</label>
+          <div class="flex items-center space-x-2">
+            <input type="text" id="manual-file-input" placeholder="Paste a live link (twitch.tv, YouTube, Kick…) or a video file path" onkeydown="if(event.key==='Enter') loadManualVideo()" oninput="onManualInputChange()" class="flex-1 min-w-0 bg-gray-950 border border-gray-800 focus:border-violet-500 focus:ring-1 focus:ring-violet-500 rounded-xl px-4 py-3 text-sm text-gray-100 placeholder-gray-500 outline-none transition font-mono">
+            <button onclick="browseManualFile()" class="px-3.5 py-3 rounded-xl bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 font-semibold border border-gray-700 transition">Browse…</button>
+            <button id="manual-load-btn" onclick="loadManualVideo()" class="px-3.5 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 text-xs text-white font-semibold transition">Load</button>
+          </div>
+        </div>
+
+        <!-- Live options (shown when a link is pasted) -->
+        <div id="live-options" class="hidden">
+          <div class="flex items-center justify-between gap-3">
+            <label class="text-xs font-semibold text-gray-300">Start recording from</label>
+            <select id="live-backfill" class="bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-200 outline-none focus:border-violet-500">
+              <option value="start" selected>Earliest available (start of stream)</option>
+              <option value="3600">Last 1 hour</option>
+              <option value="1800">Last 30 minutes</option>
+              <option value="now">Now (live edge)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Live status bar -->
+        <div id="live-bar" class="hidden rounded-xl bg-gray-950 border border-gray-800 px-4 py-3 space-y-2">
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex items-center gap-2 min-w-0">
+              <span id="live-dot" class="w-2.5 h-2.5 rounded-full bg-gray-500 flex-shrink-0"></span>
+              <span id="live-status" class="text-xs font-semibold text-gray-200 truncate">Connecting…</span>
+              <span id="live-meta" class="text-[11px] text-gray-500 font-mono truncate"></span>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <button onclick="jumpToLive()" class="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-[11px] text-white font-semibold transition">Jump to live</button>
+              <button onclick="disconnectLive(false)" class="px-2.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-[11px] text-gray-200 border border-gray-700 transition">Disconnect</button>
+              <button onclick="disconnectLive(true)" class="px-2.5 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-[11px] text-gray-400 border border-gray-800 transition" title="Disconnect and delete the recording">Discard</button>
+            </div>
+          </div>
+          <p id="live-note" class="hidden text-[11px] text-amber-400"></p>
+        </div>
+
+        <!-- Player -->
+        <div class="rounded-xl overflow-hidden bg-black border border-gray-800">
+          <video id="manual-video" controls playsinline preload="metadata" class="w-full max-h-[340px] bg-black"></video>
+        </div>
+        <p id="manual-preview-hint" class="hidden text-[11px] text-amber-400"></p>
+
+        <!-- Timeline with draggable start / end handles -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between text-[11px] text-gray-400">
+            <span>Drag the <span class="text-emerald-400 font-semibold">green</span> start and <span class="text-rose-400 font-semibold">red</span> end handles. Click the bar to jump.</span>
+            <span class="font-mono" id="mt-total">0:00.0</span>
+          </div>
+          <div id="mt-track" class="relative h-12 rounded-lg bg-gray-950 border border-gray-800 select-none cursor-pointer">
+            <div id="mt-selection" class="absolute top-0 bottom-0 bg-violet-500/30 border-y border-violet-400/60 pointer-events-none"></div>
+            <div id="mt-playhead" class="absolute top-0 bottom-0 w-0.5 bg-white/80 pointer-events-none"></div>
+            <div id="mt-handle-start" data-handle="start" class="absolute w-3.5 rounded bg-emerald-400 cursor-ew-resize shadow-lg" style="top:-4px;bottom:-4px;transform:translateX(-50%);touch-action:none"></div>
+            <div id="mt-handle-end" data-handle="end" class="absolute w-3.5 rounded bg-rose-400 cursor-ew-resize shadow-lg" style="top:-4px;bottom:-4px;transform:translateX(-50%);touch-action:none"></div>
+          </div>
+        </div>
+
+        <!-- Exact times -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2 border-t border-gray-800/80">
+          <div class="space-y-1.5">
+            <label class="block text-xs font-semibold text-emerald-400">Start <span class="text-gray-500 font-normal">(press I)</span></label>
+            <input type="text" id="manual-start-input" onchange="onManualTimeTyped('start', this.value)" class="w-full bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-200 outline-none focus:border-emerald-500 font-mono">
+            <div class="flex items-center space-x-1">
+              <button onclick="setFromPlayhead('start')" class="flex-1 px-2 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-[11px] text-gray-200 border border-gray-700 transition">Use playhead</button>
+              <button onclick="nudgeSel('start', -0.5)" class="px-2 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-[11px] text-gray-300 border border-gray-800 font-mono">-0.5</button>
+              <button onclick="nudgeSel('start', 0.5)" class="px-2 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-[11px] text-gray-300 border border-gray-800 font-mono">+0.5</button>
+            </div>
+          </div>
+          <div class="space-y-1.5">
+            <label class="block text-xs font-semibold text-rose-400">End <span class="text-gray-500 font-normal">(press O)</span></label>
+            <input type="text" id="manual-end-input" onchange="onManualTimeTyped('end', this.value)" class="w-full bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-200 outline-none focus:border-rose-500 font-mono">
+            <div class="flex items-center space-x-1">
+              <button onclick="setFromPlayhead('end')" class="flex-1 px-2 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-[11px] text-gray-200 border border-gray-700 transition">Use playhead</button>
+              <button onclick="nudgeSel('end', -0.5)" class="px-2 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-[11px] text-gray-300 border border-gray-800 font-mono">-0.5</button>
+              <button onclick="nudgeSel('end', 0.5)" class="px-2 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-[11px] text-gray-300 border border-gray-800 font-mono">+0.5</button>
+            </div>
+          </div>
+          <div class="space-y-1.5">
+            <label class="block text-xs font-semibold text-gray-300">Clip Length</label>
+            <div id="manual-duration" class="text-2xl font-bold font-mono text-white">0.0s</div>
+            <button onclick="previewSelection()" class="w-full flex items-center justify-center space-x-1.5 px-2 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-[11px] text-gray-200 border border-gray-700 transition">
+              <i data-lucide="play" class="w-3 h-3"></i><span>Preview selection</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Export options -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-gray-800/80">
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1.5">Vertical Layout</label>
+            <select id="manual-layout" class="w-full bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-200 outline-none focus:border-violet-500">
+              <option value="split" selected>Split-screen: webcam on top, gameplay below</option>
+              <option value="center">Center crop: 9:16 from the middle</option>
+              <option value="blur">Blurred background: full frame fitted</option>
+              <option value="original">Original shape: trim only</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1.5">Clip Name <span class="text-gray-500 font-normal">(optional)</span></label>
+            <input type="text" id="manual-name" maxlength="40" placeholder="e.g. insane_clutch" class="w-full bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-200 placeholder-gray-500 outline-none focus:border-violet-500">
+          </div>
+        </div>
+
+        <div class="flex items-center space-x-3 pt-1">
+          <button id="btn-export-manual" onclick="exportManualClip()" class="flex-1 flex items-center justify-center space-x-2 py-3 px-6 rounded-xl font-bold text-sm bg-gradient-to-r from-violet-500 to-fuchsia-600 hover:from-violet-400 hover:to-fuchsia-500 text-white shadow-lg shadow-violet-500/20 transition transform active:scale-[0.98]">
+            <i data-lucide="scissors" class="w-4 h-4"></i>
+            <span id="btn-export-manual-label">Export Selected Clip</span>
+          </button>
+          <button onclick="openExportsFolder('manual_exports')" class="flex items-center justify-center space-x-1.5 py-3 px-4 rounded-xl font-semibold text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 transition" title="Open manual_exports folder">
+            <i data-lucide="folder" class="w-4 h-4"></i>
+          </button>
+        </div>
+      </div>
+
       <!-- Real-Time Terminal Log Viewer -->
       <div class="glass rounded-2xl p-5 space-y-3">
         <div class="flex items-center justify-between">
@@ -289,23 +425,24 @@
       }, 4000);
     }
 
+    const TAB_BASE = 'flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition';
+    const TAB_STYLES = {
+      ai:       'bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20',
+      fallback: 'bg-gradient-to-r from-amber-500 to-orange-600 text-white shadow-md shadow-amber-500/20',
+      manual:   'bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white shadow-md shadow-violet-500/20',
+    };
+
     function switchTab(tab) {
       activeTab = tab;
-      const tabAI = document.getElementById('tab-content-ai');
-      const tabFallback = document.getElementById('tab-content-fallback');
-      const btnAI = document.getElementById('tab-btn-ai');
-      const btnFallback = document.getElementById('tab-btn-fallback');
-
-      if (tab === 'ai') {
-        tabAI.classList.remove('hidden');
-        tabFallback.classList.add('hidden');
-        btnAI.className = 'flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20';
-        btnFallback.className = 'flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition text-gray-400 hover:text-gray-200';
-      } else {
-        tabAI.classList.add('hidden');
-        tabFallback.classList.remove('hidden');
-        btnFallback.className = 'flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition bg-gradient-to-r from-amber-500 to-orange-600 text-white shadow-md shadow-amber-500/20';
-        btnAI.className = 'flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition text-gray-400 hover:text-gray-200';
+      for (const name of Object.keys(TAB_STYLES)) {
+        const on = name === tab;
+        document.getElementById('tab-content-' + name).classList.toggle('hidden', !on);
+        document.getElementById('tab-btn-' + name).className =
+          TAB_BASE + ' ' + (on ? TAB_STYLES[name] : 'text-gray-400 hover:text-gray-200');
+      }
+      if (tab !== 'manual') {
+        const mv = document.getElementById('manual-video');
+        if (mv) mv.pause();
       }
     }
 
@@ -509,8 +646,10 @@
                 <div class="flex items-center space-x-2">
                   <h4 class="text-xs font-bold text-white truncate">${clip.title}</h4>
                   <span class="px-1.5 py-0.2 rounded text-[10px] font-bold ${
-                    clip.type === 'AI Autonomous' ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                  }">🔥 ${clip.score}</span>
+                    clip.type === 'AI Autonomous' ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20'
+                    : clip.type === 'Manual' ? 'bg-violet-500/10 text-violet-400 border border-violet-500/20'
+                    : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                  }">${clip.type === 'Manual' ? '✂ Manual' : '🔥 ' + clip.score}</span>
                 </div>
                 <p class="text-[10px] text-gray-500 truncate mt-0.5">${clip.filename} • ${clip.size_mb} MB</p>
               </div>
@@ -543,6 +682,461 @@
       const player = document.getElementById('main-video-player');
       player.pause();
       box.classList.add('hidden');
+    }
+
+    // ------------------------------------------------------------------
+    // Manual Clip: pick a section yourself
+    // ------------------------------------------------------------------
+    const manual = { duration: 0, start: 0, end: 30, previewing: false, exporting: false, mode: 'file', endAtLive: false };
+    const MIN_CLIP = 0.2;           // seconds
+    const MAX_CLIP = 600;           // matches backend limit
+    const $m = (id) => document.getElementById(id);
+
+    function fmtTime(t) {
+      t = Math.round(Math.max(0, t || 0) * 10) / 10;
+      const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+      const sec = s.toFixed(1).padStart(4, '0');
+      return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+    }
+
+    // Accepts "83", "83.5", "1:23.5" or "1:02:03"
+    function parseTime(str) {
+      str = String(str).trim();
+      if (!str) return NaN;
+      const parts = str.split(':');
+      if (parts.length > 3) return NaN;
+      let total = 0;
+      for (const p of parts) {
+        const n = Number(p);
+        if (!isFinite(n) || n < 0) return NaN;
+        total = total * 60 + n;
+      }
+      return total;
+    }
+
+    // changed = which handle the user just moved, so the other one stays put
+    function applySelection(start, end, changed) {
+      const max = manual.duration || Infinity;
+      start = Math.min(Math.max(0, start), max);
+      end = Math.min(Math.max(0, end), max);
+      if (end - start < MIN_CLIP) {
+        if (changed === 'start') start = Math.max(0, end - MIN_CLIP);
+        else end = Math.min(max, start + MIN_CLIP);
+      }
+      manual.start = start;
+      manual.end = end;
+      if (changed === 'end') manual.endAtLive = manual.mode === 'live' && end >= max - 0.5;
+      renderManual();
+    }
+
+    function renderManual() {
+      const d = manual.duration;
+      const pct = (t) => d > 0 ? (t / d) * 100 : 0;
+      $m('mt-handle-start').style.left = pct(manual.start) + '%';
+      $m('mt-handle-end').style.left = pct(manual.end) + '%';
+      const sel = $m('mt-selection');
+      sel.style.left = pct(manual.start) + '%';
+      sel.style.width = Math.max(0, pct(manual.end) - pct(manual.start)) + '%';
+      $m('mt-total').textContent = d > 0 ? fmtTime(d) : '--';
+
+      // Don't overwrite a field while the user is typing in it
+      if (document.activeElement !== $m('manual-start-input')) $m('manual-start-input').value = fmtTime(manual.start);
+      if (document.activeElement !== $m('manual-end-input')) $m('manual-end-input').value = fmtTime(manual.end);
+
+      const len = manual.end - manual.start;
+      const lenEl = $m('manual-duration');
+      lenEl.textContent = len.toFixed(1) + 's';
+      lenEl.className = 'text-2xl font-bold font-mono ' + (len > MAX_CLIP ? 'text-rose-400' : 'text-white');
+    }
+
+    function updatePlayhead() {
+      const v = $m('manual-video');
+      const d = manual.duration;
+      $m('mt-playhead').style.left = (d > 0 ? (v.currentTime / d) * 100 : 0) + '%';
+    }
+
+    function seekManual(t) {
+      const v = $m('manual-video');
+      if (manual.duration > 0) v.currentTime = Math.min(Math.max(0, t), manual.duration);
+    }
+
+    function setFromPlayhead(which) {
+      const t = $m('manual-video').currentTime;
+      if (which === 'start') applySelection(t, Math.max(manual.end, t + MIN_CLIP), 'start');
+      else applySelection(manual.start, t, 'end');
+    }
+
+    function nudgeSel(which, delta) {
+      if (which === 'start') { applySelection(manual.start + delta, manual.end, 'start'); seekManual(manual.start); }
+      else { applySelection(manual.start, manual.end + delta, 'end'); seekManual(manual.end); }
+    }
+
+    function onManualTimeTyped(which, value) {
+      const t = parseTime(value);
+      if (isNaN(t)) { showToast('Use a time like 83.5, 1:23.5 or 1:02:03', 'error'); renderManual(); return; }
+      if (which === 'start') applySelection(t, Math.max(manual.end, t + MIN_CLIP), 'start');
+      else applySelection(manual.start, t, 'end');
+      seekManual(which === 'start' ? manual.start : manual.end);
+    }
+
+    function previewSelection() {
+      const v = $m('manual-video');
+      if (!v.getAttribute('src') || manual.duration <= 0) { showToast('Load a video first.', 'error'); return; }
+      manual.previewing = true;
+      v.currentTime = manual.start;
+      v.play();
+    }
+
+    async function browseManualFile() {
+      try {
+        const res = await fetch('/api/manual/browse', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'File picker unavailable', 'error'); return; }
+        if (data.path) {
+          $m('manual-file-input').value = data.path;
+          loadManualVideo();
+        }
+      } catch (e) {
+        showToast('Could not open the file picker. Paste the path instead.', 'error');
+      }
+    }
+
+    function loadManualFile() {
+      const path = $m('manual-file-input').value.trim().replace(/^"|"$/g, '');
+      if (!path) { showToast('Choose or paste a video path first.', 'error'); return; }
+      const v = $m('manual-video');
+      manual.duration = 0;
+      manual.previewing = false;
+      $m('manual-preview-hint').classList.add('hidden');
+      v.src = '/api/manual/source?path=' + encodeURIComponent(path);
+      v.load();
+    }
+
+    (function initManualClip() {
+      const v = $m('manual-video');
+      const track = $m('mt-track');
+
+      v.addEventListener('loadedmetadata', () => {
+        if (manual.mode === 'live') return;   // live length comes from the recorder, not the player
+        manual.duration = isFinite(v.duration) ? v.duration : 0;
+        $m('manual-preview-hint').classList.add('hidden');
+        applySelection(0, Math.min(manual.duration, 30), 'end');
+        updatePlayhead();
+      });
+
+      v.addEventListener('error', () => {
+        if (manual.mode !== 'file' || !v.getAttribute('src')) return;
+        manual.duration = 0;
+        const hint = $m('manual-preview-hint');
+        hint.textContent = "Your browser can't preview this file (common with .mkv/.ts or HEVC). You can still type start and end times below and export.";
+        hint.classList.remove('hidden');
+        renderManual();
+      });
+
+      v.addEventListener('timeupdate', () => {
+        updatePlayhead();
+        if (manual.previewing && v.currentTime >= manual.end) {
+          v.pause();
+          manual.previewing = false;
+        }
+      });
+      v.addEventListener('pause', () => { if (v.currentTime < manual.end) manual.previewing = false; });
+
+      // Drag the start / end handles; click the bar to jump
+      let dragging = null;
+      const timeFromPointer = (e) => {
+        const r = track.getBoundingClientRect();
+        const x = Math.min(Math.max(e.clientX - r.left, 0), r.width);
+        return (x / r.width) * manual.duration;
+      };
+
+      track.addEventListener('pointerdown', (e) => {
+        if (manual.duration <= 0) return;
+        const handle = e.target.closest('[data-handle]');
+        if (handle) {
+          dragging = handle.dataset.handle;
+          handle.setPointerCapture(e.pointerId);
+          manual.previewing = false;
+        } else {
+          seekManual(timeFromPointer(e));
+        }
+      });
+
+      track.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        const t = timeFromPointer(e);
+        if (dragging === 'start') applySelection(t, manual.end, 'start');
+        else applySelection(manual.start, t, 'end');
+        seekManual(dragging === 'start' ? manual.start : manual.end);  // show the frame you're marking
+      });
+
+      const stopDrag = () => { dragging = null; };
+      track.addEventListener('pointerup', stopDrag);
+      track.addEventListener('pointercancel', stopDrag);
+
+      // Keyboard: I = mark start, O = mark end
+      document.addEventListener('keydown', (e) => {
+        if (activeTab !== 'manual') return;
+        const tag = (e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+        if (e.key === 'i' || e.key === 'I') setFromPlayhead('start');
+        else if (e.key === 'o' || e.key === 'O') setFromPlayhead('end');
+      });
+
+      renderManual();
+    })();
+
+    // ------------------------------------------------------------------
+    // Live stream mode: record the link into a seekable buffer, clip any moment
+    // ------------------------------------------------------------------
+    const live = { active: false, id: null, status: '', seconds: 0, attached: false, hls: null, timer: null };
+
+    function isStreamUrl(s) { return /^https?:\/\//i.test(String(s).trim()); }
+
+    function onManualInputChange() {
+      const url = isStreamUrl($m('manual-file-input').value);
+      $m('live-options').classList.toggle('hidden', !url || live.active);
+      $m('manual-load-btn').textContent = url ? 'Connect' : 'Load';
+    }
+
+    function setLiveUI(show) { $m('live-bar').classList.toggle('hidden', !show); onManualInputChange(); }
+
+    function destroyHls() {
+      if (live.hls) { try { live.hls.destroy(); } catch (e) {} live.hls = null; }
+      live.attached = false;
+    }
+
+    function stopLivePoll() { if (live.timer) { clearInterval(live.timer); live.timer = null; } }
+    function startLivePoll() { stopLivePoll(); live.timer = setInterval(pollLive, 2000); pollLive(); }
+
+    function leaveLiveMode() {
+      stopLivePoll();
+      destroyHls();
+      live.active = false;
+      manual.mode = 'file';
+      manual.endAtLive = false;
+      const v = $m('manual-video');
+      v.removeAttribute('src');
+      v.load();
+      setLiveUI(false);
+    }
+
+    // One entry point for the Load / Connect button and the Enter key
+    function loadManualVideo() {
+      const raw = $m('manual-file-input').value.trim().replace(/^"|"$/g, '');
+      if (!raw) { showToast('Paste a stream link or choose a video first.', 'error'); return; }
+      if (isStreamUrl(raw)) { connectLive(raw); return; }
+      if (live.active && ['connecting', 'recording'].includes(live.status)) {
+        showToast('Disconnect the live stream first.', 'error');
+        return;
+      }
+      if (manual.mode === 'live') leaveLiveMode();
+      manual.mode = 'file';
+      loadManualFile();
+    }
+
+    async function connectLive(url) {
+      if (live.active && ['connecting', 'recording'].includes(live.status)) {
+        showToast('Already connected. Disconnect first to switch streams.', 'error');
+        return;
+      }
+      destroyHls();
+      const v = $m('manual-video');
+      v.removeAttribute('src');
+      v.load();
+      manual.mode = 'live';
+      manual.duration = 0;
+      manual.endAtLive = true;
+      manual.previewing = false;
+      live.seconds = 0;
+      $m('manual-preview-hint').classList.add('hidden');
+      live.active = true;
+      live.status = 'connecting';
+      setLiveUI(true);
+      renderLiveBar({ status: 'connecting' });
+      renderManual();
+      try {
+        const res = await fetch('/api/live/connect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, backfill: $m('live-backfill').value })
+        });
+        const data = await res.json();
+        if (!res.ok) showToast(data.detail || 'Could not connect to that stream', 'error');
+        startLivePoll();   // adopts an existing session or hides the bar if there is none
+      } catch (e) {
+        showToast('Error connecting to backend API', 'error');
+        leaveLiveMode();
+      }
+    }
+
+    async function pollLive() {
+      if (manual.mode !== 'live') { stopLivePoll(); return; }
+      let s;
+      try {
+        const res = await fetch('/api/live/status');
+        s = await res.json();
+      } catch (e) { return; }   // transient: try again on the next tick
+
+      if (!s.active) { leaveLiveMode(); return; }
+
+      live.active = true;
+      live.id = s.id;
+      live.status = s.status;
+      live.seconds = s.seconds || 0;
+
+      const d = live.seconds;
+      if (d > 0) {
+        const first = manual.duration <= 0;
+        manual.duration = d;
+        if (first) applySelection(Math.max(0, d - 30), d, 'end');           // default: the last 30 seconds
+        else if (manual.endAtLive) applySelection(manual.start, d, 'end');  // end handle follows the live edge
+        else renderManual();
+        updatePlayhead();
+        if (!live.attached && s.playlist) attachLive(s.playlist);
+      }
+      renderLiveBar(s);
+      if (['ended', 'stopped', 'error'].includes(s.status)) stopLivePoll();
+    }
+
+    function attachLive(playlistUrl) {
+      const v = $m('manual-video');
+      live.attached = true;
+      if (window.Hls && Hls.isSupported()) {
+        const hls = new Hls({ lowLatencyMode: false, liveSyncDurationCount: 3, maxBufferLength: 30 });
+        live.hls = hls;
+        hls.on(Hls.Events.MANIFEST_PARSED, () => { v.play().catch(() => {}); });
+        hls.on(Hls.Events.ERROR, (ev, data) => {
+          if (!data.fatal) return;
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+          else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+          else showToast('Player hit an error. You can still clip from the timeline.', 'error');
+        });
+        hls.loadSource(playlistUrl);
+        hls.attachMedia(v);
+      } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+        v.src = playlistUrl;
+        v.play().catch(() => {});
+      } else {
+        showToast('This browser cannot play the live preview. You can still type times and export.', 'error');
+      }
+    }
+
+    function renderLiveBar(s) {
+      const states = {
+        connecting: ['bg-amber-400 animate-pulse', 'Connecting… waiting for the first video'],
+        recording:  ['bg-rose-500 animate-pulse', 'LIVE · recording'],
+        ended:      ['bg-gray-500', 'Stream ended · everything recorded is clippable'],
+        stopped:    ['bg-gray-500', 'Disconnected · recording kept and clippable'],
+        error:      ['bg-rose-700', s.error || 'Something went wrong']
+      };
+      const [dotCls, text] = states[s.status] || states.connecting;
+      $m('live-dot').className = 'w-2.5 h-2.5 rounded-full flex-shrink-0 ' + dotCls;
+      $m('live-status').textContent = text;
+
+      const secs = s.seconds || 0;
+      let meta = '';
+      if (secs > 0) {
+        meta = `${fmtTime(secs).replace(/\.\d$/, '')} recorded · ${s.size_mb || 0} MB`;
+        if (s.status === 'recording') {
+          const behind = Math.max(0, secs - ($m('manual-video').currentTime || 0));
+          meta += behind > 12 ? ` · ${Math.round(behind)}s behind live` : ' · at live edge';
+        }
+      }
+      $m('live-meta').textContent = meta;
+
+      const note = $m('live-note');
+      note.textContent = s.note || '';
+      note.classList.toggle('hidden', !s.note);
+    }
+
+    function jumpToLive() {
+      const v = $m('manual-video');
+      if (manual.mode !== 'live' || live.seconds <= 0) return;
+      v.currentTime = (live.hls && live.hls.liveSyncPosition) || Math.max(0, live.seconds - 3);
+      v.play().catch(() => {});
+    }
+
+    async function disconnectLive(discard) {
+      if (manual.mode !== 'live') return;
+      if (discard && !confirm('Delete the whole recording? Clips you already exported are kept.')) return;
+      try {
+        await fetch('/api/live/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ delete: !!discard })
+        });
+      } catch (e) { showToast('Could not reach the backend.', 'error'); return; }
+      if (discard) {
+        leaveLiveMode();
+        manual.duration = 0;
+        renderManual();
+        showToast('Recording deleted.', 'info');
+      } else {
+        await pollLive();   // pull the final 'stopped' state into the bar
+        stopLivePoll();
+        showToast('Disconnected. The recording is kept, so you can keep clipping it.', 'info');
+      }
+    }
+
+    // After a page refresh, re-attach to a recording that is still running
+    (async function adoptLive() {
+      try {
+        const s = await (await fetch('/api/live/status')).json();
+        if (!s.active) return;
+        $m('manual-file-input').value = s.url || '';
+        manual.mode = 'live';
+        manual.endAtLive = ['connecting', 'recording'].includes(s.status);
+        live.active = true;
+        live.status = s.status;
+        setLiveUI(true);
+        startLivePoll();
+      } catch (e) {}
+    })();
+
+    async function exportManualClip() {
+      if (manual.exporting) return;
+      const file_path = $m('manual-file-input').value.trim().replace(/^"|"$/g, '');
+      if (manual.mode !== 'live' && !file_path) { showToast('Choose a video first.', 'error'); return; }
+      const len = manual.end - manual.start;
+      if (len < MIN_CLIP) { showToast('Select a section first.', 'error'); return; }
+      if (len > MAX_CLIP) { showToast(`Clips are limited to ${MAX_CLIP / 60} minutes.`, 'error'); return; }
+
+      const btn = $m('btn-export-manual');
+      const label = $m('btn-export-manual-label');
+      manual.exporting = true;
+      btn.disabled = true;
+      btn.classList.add('opacity-60', 'cursor-not-allowed');
+      label.textContent = 'Exporting…';
+
+      try {
+        const res = await fetch(manual.mode === 'live' ? '/api/live/clip' : '/api/manual/export', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            file_path,
+            start: manual.start,
+            end: manual.end,
+            layout: $m('manual-layout').value,
+            name: $m('manual-name').value.trim()
+          })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`Clip saved: ${data.filename}`, 'success');
+          loadClips();
+          playClip(data.url);
+        } else {
+          showToast(data.detail || 'Export failed', 'error');
+        }
+      } catch (e) {
+        showToast('Error connecting to backend API', 'error');
+      } finally {
+        manual.exporting = false;
+        btn.disabled = false;
+        btn.classList.remove('opacity-60', 'cursor-not-allowed');
+        label.textContent = 'Export Selected Clip';
+      }
     }
 
     // Auto-polling interval
