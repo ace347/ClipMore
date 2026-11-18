@@ -1,59 +1,71 @@
-# AutoClipper — Two Independent Clipping Systems
+# ClipMore Studio — Autonomous Stream Clipper & Fallback DSP Pipeline
 
-## Workspace Layout
+A complete desktop suite for clipping live Twitch, YouTube, and Kick streams into viral 9:16 vertical videos (Shorts, TikTok, Reels) with GPU-accelerated split-screen framing and Faster-Whisper captions.
+
+---
+
+## 🚀 Easy Web UI (Recommended)
+
+Double-click **`launch_ui.bat`** or run:
+```powershell
+.\.venv\Scripts\python.exe app.py
+```
+Open **`http://127.0.0.1:8501`** in any browser.
+
+### Web UI Features
+- **One-Click Live Clipping**: Paste any Twitch / Kick / YouTube URL and click Start.
+- **GPU Dashboard**: Live NVIDIA GeForce RTX GPU utilization, VRAM, and temperature monitoring.
+- **Real-Time Terminal**: Watch live chat velocity, audio RMS spikes, and Whisper captions stream in the browser.
+- **Built-in Mobile Player**: Preview finished 9:16 vertical clips with audio right inside the dashboard.
+- **Direct Downloads**: Download clips or click "Open Exports" to view them in Windows File Explorer.
+- **Mode Toggle**: Switch seamlessly between **AI Autonomous Live Clipper** and **Zero-AI Fallback DSP Clipper**.
+
+---
+
+## 📂 Workspace Structure
 
 ```
-C:\AutoClipper\
-├── ai\                         ← PRIMARY: AI-Driven Autonomous Clipper
-│   ├── auto_viral_clipper.py      Neural Whisper + Chat Velocity + Audio RMS
-│   ├── run_ai.bat                 Double-click launcher
+C:\AutoClipper\ (c:\Users\A S U S\Documents\Clipping)
+├── launch_ui.bat                ← Double-click to start Web UI
+├── app.py                       ← Web UI backend server (FastAPI)
+│
+├── ai\                          ← PRIMARY: AI-Driven Autonomous Clipper
+│   ├── auto_viral_clipper.py       Live Chat Velocity + Audio RMS + Whisper CUDA + NVENC
+│   ├── run_ai.bat                  Double-click CLI launcher
 │   └── README.md
 │
-├── manual\                     ← SECONDARY: Zero-AI Fallback Clipper
-│   ├── fallback_clipper.py        Pure DSP audio energy spike detection
-│   ├── run_fallback.bat           Double-click launcher
+├── manual\                      ← SECONDARY: Zero-AI Fallback DSP Clipper
+│   ├── fallback_clipper.py         Pure acoustic energy thresholding (>2σ)
+│   ├── run_fallback.bat            Double-click CLI launcher
 │   └── README.md
 │
+├── web\                         ← Web UI Templates & UI assets
+│   └── templates/index.html
+│
+├── exports\                     ← Finished 9:16 vertical clips (AI mode)
+├── fallback_exports\            ← Finished 9:16 vertical clips (Fallback mode)
+├── raw_chunks\                  ← Rolling .ts stream buffer
 ├── .agents/skills/viral-stream-clipper/
-│   └── SKILL.md                   Antigravity Agent Skill (auto-triggers on stream links)
-│
-├── .venv\                      ← Shared Python 3.12 virtual environment
-├── raw_chunks\                 ← Rolling .ts stream buffer (AI mode)
-├── exports\                    ← Finished 9:16 clips (AI mode)
-├── fallback_exports\           ← Finished 9:16 clips (Fallback mode)
-└── temp\                       ← Intermediate files
+│   └── SKILL.md                 ← Antigravity Agent Skill
+└── .venv\                       ← Python 3.12 + PyTorch/CUDA environment
 ```
 
 ---
 
-## System 1: AI Autonomous Clipper (`ai/`)
+## 💻 Command Line Execution
 
-| Feature | Detail |
-|:---|:---|
-| Detection | Chat velocity spikes + Audio RMS peaks + Whisper transcript hooks |
-| Transcription | faster-whisper `small.en` on CUDA float16 |
-| Captions | Auto-generated `.ass` (3 uppercase words/line, TikTok style) |
-| Rendering | 9:16 split-screen (facecam top, gameplay bottom) via h264_nvenc |
-| Input | Live Twitch / YouTube / Kick stream URL |
-
+### 1. AI Autonomous Clipper (Live Stream)
 ```powershell
-cd C:\AutoClipper
 .\.venv\Scripts\python.exe ai\auto_viral_clipper.py "https://www.twitch.tv/channelname"
 ```
 
----
-
-## System 2: Fallback DSP Clipper (`manual/`)
-
-| Feature | Detail |
-|:---|:---|
-| Detection | Pure audio RMS energy thresholding (>2σ) |
-| AI Required | None — zero tokens, zero neural networks |
-| Captions | None (raw video export) |
-| Rendering | 9:16 split-screen via h264_nvenc |
-| Input | Pre-recorded VOD or local video file |
-
+### 2. Fallback DSP Clipper (Local Video / VOD)
 ```powershell
-cd C:\AutoClipper
-.\.venv\Scripts\python.exe manual\fallback_clipper.py path\to\video.mp4
+.\.venv\Scripts\python.exe manual\fallback_clipper.py path\to\video.mp4 --max-clips 5
+```
+
+### 3. Self-Test
+```powershell
+.\.venv\Scripts\python.exe ai\auto_viral_clipper.py --test
+.\.venv\Scripts\python.exe manual\fallback_clipper.py --test
 ```

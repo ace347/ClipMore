@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClipMore Studio - Autonomous Stream Clipper</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      background-color: #0b0f19;
+      color: #f3f4f6;
+    }
+    .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #111827;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #374151;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #4b5563;
+    }
+    .glass {
+      background: rgba(17, 24, 39, 0.7);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .glow-cyan {
+      box-shadow: 0 0 25px -5px rgba(6, 182, 212, 0.35);
+    }
+    .glow-violet {
+      box-shadow: 0 0 25px -5px rgba(139, 92, 246, 0.35);
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- Top Navigation Bar -->
+  <header class="glass sticky top-0 z-40 border-b border-gray-800/80 px-6 py-3.5 flex items-center justify-between">
+    <div class="flex items-center space-x-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 to-violet-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
+        <i data-lucide="scissors" class="w-5 h-5 text-white"></i>
+      </div>
+      <div>
+        <div class="flex items-center space-x-2">
+          <span class="font-extrabold text-lg tracking-tight bg-gradient-to-r from-white via-gray-200 to-gray-400 bg-clip-text text-transparent">ClipMore</span>
+          <span class="px-2 py-0.5 text-[10px] font-bold tracking-wider uppercase rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">Studio v1.0</span>
+        </div>
+        <p class="text-xs text-gray-400">Autonomous Viral 9:16 Live Stream Clipper</p>
+      </div>
+    </div>
+
+    <!-- GPU & Engine Status Badge -->
+    <div class="flex items-center space-x-4">
+      <div id="gpu-badge" class="hidden md:flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-800 text-xs">
+        <i data-lucide="cpu" class="w-4 h-4 text-emerald-400"></i>
+        <span class="text-gray-300 font-medium" id="gpu-name">Detecting GPU...</span>
+        <span class="px-1.5 py-0.5 text-[10px] rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" id="gpu-util">0%</span>
+      </div>
+
+      <div class="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-800 text-xs">
+        <span class="w-2.5 h-2.5 rounded-full bg-gray-500" id="engine-dot"></span>
+        <span class="text-gray-300 font-semibold uppercase tracking-wider text-[11px]" id="engine-status">IDLE</span>
+      </div>
+
+      <button onclick="runQuickTest()" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 transition font-medium border border-gray-700">
+        <i data-lucide="play-circle" class="w-3.5 h-3.5 text-cyan-400"></i>
+        <span>Self-Test</span>
+      </button>
+
+      <button onclick="openExportsFolder('exports')" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-xs text-white transition font-medium shadow-md shadow-violet-500/20">
+        <i data-lucide="folder" class="w-3.5 h-3.5"></i>
+        <span>Open Exports</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="flex-1 max-w-7xl w-full mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+    <!-- Left Column: Controls & Tabs (7 cols) -->
+    <div class="lg:col-span-7 space-y-6">
+
+      <!-- Navigation Tabs -->
+      <div class="flex space-x-2 p-1.5 rounded-xl bg-gray-900/90 border border-gray-800">
+        <button id="tab-btn-ai" onclick="switchTab('ai')" class="flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20">
+          <i data-lucide="sparkles" class="w-4 h-4"></i>
+          <span>AI Autonomous Clipper</span>
+        </button>
+        <button id="tab-btn-fallback" onclick="switchTab('fallback')" class="flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition text-gray-400 hover:text-gray-200">
+          <i data-lucide="zap" class="w-4 h-4"></i>
+          <span>Fallback DSP Clipper (0 AI Tokens)</span>
+        </button>
+      </div>
+
+      <!-- Tab 1: AI Autonomous Live Clipper Panel -->
+      <div id="tab-content-ai" class="glass rounded-2xl p-6 space-y-5">
+        <div>
+          <div class="flex items-center justify-between">
+            <h2 class="text-base font-bold text-white flex items-center space-x-2">
+              <i data-lucide="radio" class="w-4 h-4 text-cyan-400 animate-pulse"></i>
+              <span>Live Stream URL</span>
+            </h2>
+            <span class="text-[11px] text-gray-400">Supports Twitch, Kick, YouTube</span>
+          </div>
+          <p class="text-xs text-gray-400 mt-0.5">Monitors live chat velocity, spikes & speech for viral vertical shorts.</p>
+        </div>
+
+        <div class="space-y-2">
+          <div class="relative">
+            <input type="text" id="ai-url-input" placeholder="e.g. https://www.twitch.tv/tarik" class="w-full bg-gray-950 border border-gray-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-xl px-4 py-3 text-sm text-gray-100 placeholder-gray-500 outline-none transition font-mono pr-28">
+            <button onclick="pasteClipboard()" class="absolute right-2 top-2 px-2.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-[11px] text-gray-300 transition font-medium border border-gray-700">
+              Paste URL
+            </button>
+          </div>
+
+          <!-- Quick presets -->
+          <div class="flex items-center space-x-2 pt-1 text-xs text-gray-400">
+            <span class="text-[11px]">Quick Samples:</span>
+            <button onclick="setSampleUrl('https://www.twitch.tv/tarik')" class="px-2 py-0.5 rounded bg-gray-900 border border-gray-800 hover:border-gray-700 text-[11px] text-gray-300">#tarik</button>
+            <button onclick="setSampleUrl('https://www.twitch.tv/shroud')" class="px-2 py-0.5 rounded bg-gray-900 border border-gray-800 hover:border-gray-700 text-[11px] text-gray-300">#shroud</button>
+            <button onclick="setSampleUrl('https://www.twitch.tv/caseoh_')" class="px-2 py-0.5 rounded bg-gray-900 border border-gray-800 hover:border-gray-700 text-[11px] text-gray-300">#caseoh_</button>
+          </div>
+        </div>
+
+        <!-- Options Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-gray-800/80">
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1.5 flex items-center justify-between">
+              <span>Chat Spike Sensitivity</span>
+              <span id="threshold-val" class="text-cyan-400 font-mono">2.5x</span>
+            </label>
+            <input type="range" id="threshold-slider" min="1.5" max="4.0" step="0.1" value="2.5" oninput="document.getElementById('threshold-val').textContent = this.value + 'x'" class="w-full accent-cyan-500 cursor-pointer">
+            <p class="text-[10px] text-gray-500 mt-1">Lower = more clips | Higher = only extreme hype</p>
+          </div>
+
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1.5">Whisper Caption Model</label>
+            <select id="whisper-model-select" class="w-full bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-200 outline-none focus:border-cyan-500">
+              <option value="small.en" selected>small.en (Recommended - High Accuracy)</option>
+              <option value="base">base (Balanced & Fast)</option>
+              <option value="tiny">tiny (Ultra Lightweight)</option>
+            </select>
+            <p class="text-[10px] text-gray-500 mt-1">CUDA float16 hardware accelerated</p>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="flex items-center space-x-3 pt-3">
+          <button id="btn-start-ai" onclick="startAIClipper()" class="flex-1 flex items-center justify-center space-x-2 py-3 px-6 rounded-xl font-bold text-sm bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white shadow-lg shadow-emerald-500/20 transition transform active:scale-[0.98]">
+            <i data-lucide="play" class="w-4 h-4 fill-white"></i>
+            <span>Start Autonomous Clipper</span>
+          </button>
+          <button id="btn-stop-ai" onclick="stopClipper()" disabled class="flex items-center justify-center space-x-2 py-3 px-6 rounded-xl font-bold text-sm bg-rose-600/30 text-rose-300 border border-rose-500/30 cursor-not-allowed opacity-50 transition">
+            <i data-lucide="square" class="w-4 h-4"></i>
+            <span>Stop</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Tab 2: Fallback DSP Clipper Panel -->
+      <div id="tab-content-fallback" class="glass rounded-2xl p-6 space-y-5 hidden">
+        <div>
+          <div class="flex items-center justify-between">
+            <h2 class="text-base font-bold text-white flex items-center space-x-2">
+              <i data-lucide="zap" class="w-4 h-4 text-amber-400"></i>
+              <span>Secondary Fallback DSP Clipper</span>
+            </h2>
+            <span class="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">0 AI Tokens</span>
+          </div>
+          <p class="text-xs text-gray-400 mt-0.5">Runs on pre-recorded VODs or videos using deterministic audio energy (RMS) spikes.</p>
+        </div>
+
+        <div class="space-y-2">
+          <label class="block text-xs font-semibold text-gray-300">Local Video / VOD File Path</label>
+          <input type="text" id="fallback-file-input" placeholder="e.g. C:\Videos\full_stream.mp4" class="w-full bg-gray-950 border border-gray-800 focus:border-amber-500 focus:ring-1 focus:ring-amber-500 rounded-xl px-4 py-3 text-sm text-gray-100 placeholder-gray-500 outline-none transition font-mono">
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-gray-800/80">
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1.5">Max Viral Clips to Export</label>
+            <input type="number" id="fallback-max-clips" min="1" max="25" value="5" class="w-full bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-200 outline-none focus:border-amber-500">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1.5">Export Target</label>
+            <p class="text-xs text-gray-400 mt-2 font-mono">fallback_exports/</p>
+          </div>
+        </div>
+
+        <div class="flex items-center space-x-3 pt-3">
+          <button id="btn-start-fallback" onclick="startFallbackClipper()" class="flex-1 flex items-center justify-center space-x-2 py-3 px-6 rounded-xl font-bold text-sm bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white shadow-lg shadow-amber-500/20 transition transform active:scale-[0.98]">
+            <i data-lucide="play" class="w-4 h-4 fill-white"></i>
+            <span>Extract Highlights with DSP</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Real-Time Terminal Log Viewer -->
+      <div class="glass rounded-2xl p-5 space-y-3">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center space-x-2">
+            <i data-lucide="terminal" class="w-4 h-4 text-gray-400"></i>
+            <h3 class="text-xs font-bold uppercase tracking-wider text-gray-300">Live Console Output</h3>
+          </div>
+          <div class="flex items-center space-x-2">
+            <button onclick="clearConsole()" class="text-[11px] text-gray-400 hover:text-gray-200 px-2 py-1 rounded bg-gray-900 border border-gray-800 transition">
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div id="terminal-logs" class="w-full h-56 bg-gray-950/90 border border-gray-800 rounded-xl p-3.5 font-mono text-[11px] text-gray-300 overflow-y-auto space-y-1">
+          <div class="text-gray-500 italic">[SYSTEM] Ready. Select a mode above and click Start.</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Right Column: Finished 9:16 Clips Gallery (5 cols) -->
+    <div class="lg:col-span-5 space-y-6">
+
+      <div class="glass rounded-2xl p-5 space-y-4">
+        <div class="flex items-center justify-between border-b border-gray-800/80 pb-3">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center space-x-2">
+              <i data-lucide="film" class="w-4 h-4 text-violet-400"></i>
+              <span>Generated 9:16 Clips</span>
+            </h3>
+            <p class="text-xs text-gray-400" id="clip-count-label">0 clips available</p>
+          </div>
+          <button onclick="loadClips()" class="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 transition" title="Refresh Clips">
+            <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+          </button>
+        </div>
+
+        <!-- Video Player Modal / Preview -->
+        <div id="video-preview-box" class="hidden rounded-xl overflow-hidden bg-black border border-gray-800 relative aspect-[9/16] max-h-[380px] mx-auto shadow-2xl">
+          <video id="main-video-player" controls playsinline class="w-full h-full object-contain"></video>
+          <button onclick="closePreview()" class="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 hover:bg-black text-white text-xs">
+            <i data-lucide="x" class="w-4 h-4"></i>
+          </button>
+        </div>
+
+        <!-- Clips List Scrollable -->
+        <div id="clips-list" class="space-y-3 max-h-[580px] overflow-y-auto pr-1">
+          <div class="text-center py-12 text-gray-500 text-xs">
+            <i data-lucide="video-off" class="w-8 h-8 mx-auto text-gray-600 mb-2"></i>
+            <span>No clips exported yet.<br>Start the clipper or run Self-Test to generate clips!</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- Notification Toast -->
+  <div id="toast" class="fixed bottom-6 right-6 z-50 transform translate-y-20 opacity-0 transition-all duration-300 pointer-events-none px-4 py-3 rounded-xl shadow-2xl flex items-center space-x-2 text-xs font-semibold text-white"></div>
+
+  <script>
+    // Initialize Lucide Icons
+    lucide.createIcons();
+
+    let currentLogIndex = 0;
+    let pollInterval = null;
+    let activeTab = 'ai';
+
+    function showToast(message, type = 'info') {
+      const toast = document.getElementById('toast');
+      toast.className = `fixed bottom-6 right-6 z-50 transform translate-y-0 opacity-100 transition-all duration-300 pointer-events-auto px-4 py-3 rounded-xl shadow-2xl flex items-center space-x-2 text-xs font-semibold text-white ${
+        type === 'success' ? 'bg-emerald-600' : type === 'error' ? 'bg-rose-600' : 'bg-gray-800 border border-gray-700'
+      }`;
+      toast.textContent = message;
+      setTimeout(() => {
+        toast.className = toast.className.replace('translate-y-0 opacity-100', 'translate-y-20 opacity-0');
+      }, 4000);
+    }
+
+    function switchTab(tab) {
+      activeTab = tab;
+      const tabAI = document.getElementById('tab-content-ai');
+      const tabFallback = document.getElementById('tab-content-fallback');
+      const btnAI = document.getElementById('tab-btn-ai');
+      const btnFallback = document.getElementById('tab-btn-fallback');
+
+      if (tab === 'ai') {
+        tabAI.classList.remove('hidden');
+        tabFallback.classList.add('hidden');
+        btnAI.className = 'flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20';
+        btnFallback.className = 'flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition text-gray-400 hover:text-gray-200';
+      } else {
+        tabAI.classList.add('hidden');
+        tabFallback.classList.remove('hidden');
+        btnFallback.className = 'flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition bg-gradient-to-r from-amber-500 to-orange-600 text-white shadow-md shadow-amber-500/20';
+        btnAI.className = 'flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg font-semibold text-xs tracking-wide transition text-gray-400 hover:text-gray-200';
+      }
+    }
+
+    function setSampleUrl(url) {
+      document.getElementById('ai-url-input').value = url;
+    }
+
+    async function pasteClipboard() {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) document.getElementById('ai-url-input').value = text;
+      } catch (err) {
+        showToast('Clipboard access denied. Please paste manually.', 'error');
+      }
+    }
+
+    async function updateStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        // GPU stats
+        if (data.gpu && data.gpu.available) {
+          document.getElementById('gpu-badge').classList.remove('hidden');
+          document.getElementById('gpu-name').textContent = data.gpu.name;
+          document.getElementById('gpu-util').textContent = data.gpu.utilization;
+        }
+
+        // Engine Status
+        const dot = document.getElementById('engine-dot');
+        const statusLabel = document.getElementById('engine-status');
+        const btnStartAI = document.getElementById('btn-start-ai');
+        const btnStopAI = document.getElementById('btn-stop-ai');
+
+        if (data.is_running) {
+          dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping';
+          statusLabel.textContent = data.mode.toUpperCase() + ' RUNNING';
+          statusLabel.className = 'text-emerald-400 font-bold uppercase tracking-wider text-[11px]';
+          btnStartAI.disabled = true;
+          btnStartAI.classList.add('opacity-50', 'cursor-not-allowed');
+          btnStopAI.disabled = false;
+          btnStopAI.className = 'flex items-center justify-center space-x-2 py-3 px-6 rounded-xl font-bold text-sm bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 transition cursor-pointer';
+        } else {
+          dot.className = 'w-2.5 h-2.5 rounded-full bg-gray-500';
+          statusLabel.textContent = 'IDLE';
+          statusLabel.className = 'text-gray-400 font-semibold uppercase tracking-wider text-[11px]';
+          btnStartAI.disabled = false;
+          btnStartAI.classList.remove('opacity-50', 'cursor-not-allowed');
+          btnStopAI.disabled = true;
+          btnStopAI.className = 'flex items-center justify-center space-x-2 py-3 px-6 rounded-xl font-bold text-sm bg-rose-600/30 text-rose-300 border border-rose-500/30 cursor-not-allowed opacity-50 transition';
+        }
+      } catch (e) {}
+    }
+
+    async function fetchLogs() {
+      try {
+        const res = await fetch(`/api/logs?last_index=${currentLogIndex}`);
+        const data = await res.json();
+        if (data.logs && data.logs.length > 0) {
+          const terminal = document.getElementById('terminal-logs');
+          data.logs.forEach(msg => {
+            const row = document.createElement('div');
+            // Color code log tags
+            if (msg.includes('[CHAT]') || msg.includes('[CHAT_SPIKE]')) {
+              row.className = 'text-cyan-400';
+            } else if (msg.includes('[AI]') || msg.includes('[WHISPER]')) {
+              row.className = 'text-violet-400';
+            } else if (msg.includes('[EXPORT]') || msg.includes('FINISHED')) {
+              row.className = 'text-emerald-400 font-semibold';
+            } else if (msg.includes('[ERROR]')) {
+              row.className = 'text-rose-400 font-bold';
+            } else {
+              row.className = 'text-gray-300';
+            }
+            row.textContent = msg;
+            terminal.appendChild(row);
+          });
+          currentLogIndex = data.next_index;
+          terminal.scrollTop = terminal.scrollHeight;
+        }
+      } catch (e) {}
+    }
+
+    function clearConsole() {
+      document.getElementById('terminal-logs').innerHTML = '';
+      currentLogIndex = 0;
+    }
+
+    async function startAIClipper() {
+      const url = document.getElementById('ai-url-input').value.trim();
+      const threshold = parseFloat(document.getElementById('threshold-slider').value);
+      const model = document.getElementById('whisper-model-select').value;
+
+      if (!url) {
+        showToast('Please enter a live stream URL first!', 'error');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/ai/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, threshold, model })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`Autonomous Clipper launched for ${url}!`, 'success');
+          clearConsole();
+        } else {
+          showToast(data.detail || 'Failed to start clipper', 'error');
+        }
+      } catch (e) {
+        showToast('Error connecting to backend API', 'error');
+      }
+    }
+
+    async function startFallbackClipper() {
+      const file_path = document.getElementById('fallback-file-input').value.trim();
+      const max_clips = parseInt(document.getElementById('fallback-max-clips').value) || 5;
+
+      if (!file_path) {
+        showToast('Please specify a video file path!', 'error');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/fallback/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_path, max_clips })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast('Fallback DSP Clipper started!', 'success');
+          clearConsole();
+        } else {
+          showToast(data.detail || 'Failed to start fallback clipper', 'error');
+        }
+      } catch (e) {
+        showToast('Error connecting to backend API', 'error');
+      }
+    }
+
+    async function runQuickTest() {
+      try {
+        const res = await fetch('/api/test', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          showToast('Self-test started! Check terminal logs.', 'info');
+          clearConsole();
+        } else {
+          showToast(data.detail || 'Test error', 'error');
+        }
+      } catch (e) {}
+    }
+
+    async function stopClipper() {
+      try {
+        const res = await fetch('/api/stop', { method: 'POST' });
+        showToast('Clipper stopped.', 'info');
+      } catch (e) {}
+    }
+
+    async function openExportsFolder(folder = 'exports') {
+      try {
+        await fetch(`/api/open-folder?folder=${folder}`, { method: 'POST' });
+        showToast('Opened folder in Windows Explorer', 'info');
+      } catch (e) {}
+    }
+
+    async function loadClips() {
+      try {
+        const res = await fetch('/api/clips');
+        const data = await res.json();
+        const container = document.getElementById('clips-list');
+        const countLabel = document.getElementById('clip-count-label');
+
+        countLabel.textContent = `${data.clips.length} clip(s) available`;
+
+        if (data.clips.length === 0) {
+          container.innerHTML = `
+            <div class="text-center py-12 text-gray-500 text-xs">
+              <i data-lucide="video-off" class="w-8 h-8 mx-auto text-gray-600 mb-2"></i>
+              <span>No clips exported yet.<br>Start the clipper or run Self-Test to generate clips!</span>
+            </div>
+          `;
+          lucide.createIcons();
+          return;
+        }
+
+        container.innerHTML = '';
+        data.clips.forEach(clip => {
+          const item = document.createElement('div');
+          item.className = 'p-3.5 rounded-xl bg-gray-950/80 border border-gray-800 hover:border-gray-700 transition flex items-center justify-between space-x-3';
+          item.innerHTML = `
+            <div class="flex items-center space-x-3 min-w-0">
+              <div class="w-10 h-10 rounded-lg bg-gray-900 border border-gray-800 flex items-center justify-center flex-shrink-0 cursor-pointer hover:bg-gray-800" onclick="playClip('${clip.url}')">
+                <i data-lucide="play" class="w-4 h-4 text-cyan-400 fill-cyan-400"></i>
+              </div>
+              <div class="min-w-0">
+                <div class="flex items-center space-x-2">
+                  <h4 class="text-xs font-bold text-white truncate">${clip.title}</h4>
+                  <span class="px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                    clip.type === 'AI Autonomous' ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                  }">🔥 ${clip.score}</span>
+                </div>
+                <p class="text-[10px] text-gray-500 truncate mt-0.5">${clip.filename} • ${clip.size_mb} MB</p>
+              </div>
+            </div>
+            <div class="flex items-center space-x-1 flex-shrink-0">
+              <button onclick="playClip('${clip.url}')" class="p-2 rounded-lg hover:bg-gray-800 text-gray-300 transition" title="Preview Clip">
+                <i data-lucide="eye" class="w-4 h-4"></i>
+              </button>
+              <a href="${clip.url}" download="${clip.filename}" class="p-2 rounded-lg hover:bg-gray-800 text-gray-300 transition" title="Download MP4">
+                <i data-lucide="download" class="w-4 h-4"></i>
+              </a>
+            </div>
+          `;
+          container.appendChild(item);
+        });
+        lucide.createIcons();
+      } catch (e) {}
+    }
+
+    function playClip(url) {
+      const box = document.getElementById('video-preview-box');
+      const player = document.getElementById('main-video-player');
+      player.src = url;
+      box.classList.remove('hidden');
+      player.play();
+    }
+
+    function closePreview() {
+      const box = document.getElementById('video-preview-box');
+      const player = document.getElementById('main-video-player');
+      player.pause();
+      box.classList.add('hidden');
+    }
+
+    // Auto-polling interval
+    setInterval(() => {
+      updateStatus();
+      fetchLogs();
+    }, 1500);
+
+    // Refresh clips every 8 seconds
+    setInterval(() => {
+      loadClips();
+    }, 8000);
+
+    // Initial load
+    updateStatus();
+    loadClips();
+  </script>
+</body>
+</html>
