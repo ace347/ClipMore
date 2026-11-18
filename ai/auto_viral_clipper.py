@@ -31,6 +31,7 @@ import os
 import sys
 import time
 import re
+import shutil
 import socket
 import threading
 import subprocess
@@ -38,9 +39,14 @@ import numpy as np
 from pathlib import Path
 from collections import deque
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  CUDA DLL Bootstrap — must run BEFORE importing faster_whisper / ctranslate2
-# ═══════════════════════════════════════════════════════════════════════════
+# Ensure Windows stdout/stderr handles UTF-8 safely
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 def _bootstrap_cuda_and_ffmpeg():
@@ -51,7 +57,7 @@ def _bootstrap_cuda_and_ffmpeg():
         for sub in venv_sp.iterdir():
             bin_dir = sub / "bin"
             if bin_dir.is_dir() and str(bin_dir) not in os.environ.get("PATH", ""):
-                os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ["PATH"]
+                os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
                 if hasattr(os, "add_dll_directory"):
                     try:
                         os.add_dll_directory(str(bin_dir))
@@ -66,7 +72,7 @@ def _bootstrap_cuda_and_ffmpeg():
             for exe in base.glob("**/ffmpeg.exe"):
                 d = str(exe.parent)
                 if d not in os.environ.get("PATH", ""):
-                    os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
+                    os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
                 return
 
 _bootstrap_cuda_and_ffmpeg()
@@ -78,13 +84,16 @@ from faster_whisper import WhisperModel
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RAW_CHUNKS   = PROJECT_ROOT / "raw_chunks"
 EXPORTS      = PROJECT_ROOT / "exports"
+TEMP         = PROJECT_ROOT / "temp"
 
 os.makedirs(RAW_CHUNKS, exist_ok=True)
 os.makedirs(EXPORTS, exist_ok=True)
+os.makedirs(TEMP, exist_ok=True)
 
 def log(tag, msg):
     from datetime import datetime
-    print(f"[{datetime.now():%H:%M:%S}] [{tag}] {msg}", flush=True)
+    clean_msg = str(msg).encode("ascii", "replace").decode("ascii")
+    print(f"[{datetime.now():%H:%M:%S}] [{tag}] {clean_msg}", flush=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -93,9 +102,9 @@ def log(tag, msg):
 log("INIT", "Loading Whisper model into GPU memory (small.en, CUDA float16)...")
 try:
     whisper_model = WhisperModel("small.en", device="cuda", compute_type="float16")
-    log("INIT", "✅ Whisper loaded on CUDA (RTX GPU)")
+    log("INIT", "[OK] Whisper loaded on CUDA (RTX GPU)")
 except Exception as e:
-    log("INIT", f"CUDA unavailable ({e}), falling back to CPU int8")
+    log("INIT", f"CUDA init notice ({e}), falling back to CPU int8")
     whisper_model = WhisperModel("small.en", device="cpu", compute_type="int8")
 
 
@@ -177,7 +186,6 @@ def _run_chat_downloader(stream_url: str, platform_name: str = "Platform"):
 
 def _process_chat_message(now: float, message_text: str, window: list):
     window.append(now)
-    # 10-second rolling window
     cutoff = now - 10.0
     while window and window[0] < cutoff:
         window.pop(0)
@@ -201,7 +209,7 @@ def _process_chat_message(now: float, message_text: str, window: list):
 def start_capture_process(stream_url: str):
     """
     Starts stream ingestion into raw_chunks/chunk_%04d.ts.
-    Automatically chooses yt-dlp for YouTube, and streamlink for Twitch/Kick.
+    Uses yt-dlp for YouTube, and streamlink for Twitch/Kick.
     """
     is_youtube = "youtube.com" in stream_url.lower() or "youtu.be" in stream_url.lower()
     chunk_pattern = str(RAW_CHUNKS / "chunk_%04d.ts")
@@ -209,32 +217,52 @@ def start_capture_process(stream_url: str):
     if is_youtube:
         log("CAPTURE", f"Resolving YouTube stream via yt-dlp for: {stream_url}")
         try:
-            # First try direct HLS URL resolution
-            cmd_url = [sys.executable, "-m", "yt_dlp", "-g", "--no-warnings", "-f", "best[ext=mp4]/best", stream_url]
+            # Prefer AVC/H.264 video + AAC audio so MPEG-TS muxer recognizes streams cleanly
+            cmd_url = [
+                sys.executable, "-m", "yt_dlp", "-g", "--no-warnings",
+                "-f", "bestvideo[vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=avc]+bestaudio/bestvideo+bestaudio/best",
+                stream_url
+            ]
             res = subprocess.run(cmd_url, capture_output=True, text=True, timeout=15)
-            direct_hls = res.stdout.strip().split("\n")[0]
-            if res.returncode == 0 and direct_hls.startswith("http"):
-                log("CAPTURE", "Resolved direct YouTube stream URL. Connecting FFmpeg segmenter...")
+            urls = [u.strip() for u in res.stdout.split("\n") if u.strip().startswith("http")]
+
+            if len(urls) == 2:
+                v_url, a_url = urls[0], urls[1]
+                log("CAPTURE", "Resolved video and audio feeds. Connecting FFmpeg segmenter...")
                 ffmpeg_cmd = [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
                     "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-                    "-i", direct_hls,
-                    "-c", "copy", "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1",
+                    "-i", v_url,
+                    "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+                    "-i", a_url,
+                    "-c:v", "copy", "-c:a", "aac",
+                    "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1",
+                    chunk_pattern
+                ]
+                return subprocess.Popen(ffmpeg_cmd)
+            elif len(urls) == 1:
+                log("CAPTURE", "Resolved single stream URL. Connecting FFmpeg segmenter...")
+                ffmpeg_cmd = [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
+                    "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+                    "-i", urls[0],
+                    "-c", "copy",
+                    "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1",
                     chunk_pattern
                 ]
                 return subprocess.Popen(ffmpeg_cmd)
         except Exception as e:
-            log("CAPTURE", f"YouTube direct HLS notice: {e}, falling back to piped yt-dlp...")
+            log("CAPTURE", f"Direct URL resolution notice: {e}, falling back to pipe...")
 
         # Pipe fallback with yt-dlp
-        log("CAPTURE", "Piping YouTube live stream through yt-dlp -> FFmpeg...")
+        log("CAPTURE", "Streaming YouTube through yt-dlp pipe -> FFmpeg...")
         p1 = subprocess.Popen(
-            [sys.executable, "-m", "yt_dlp", "-o", "-", "-f", "best[height<=1080]/best", "--no-warnings", stream_url],
+            [sys.executable, "-m", "yt_dlp", "-o", "-", "-f", "bestvideo[vcodec^=avc]+bestaudio/best", "--no-warnings", stream_url],
             stdout=subprocess.PIPE
         )
         p2 = subprocess.Popen(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-i", "pipe:0",
-             "-c", "copy", "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1", chunk_pattern],
+             "-c:v", "copy", "-c:a", "aac", "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1", chunk_pattern],
             stdin=p1.stdout
         )
         p1.stdout.close()
@@ -296,31 +324,49 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  9:16 Vertical Split-Screen Renderer (NVENC GPU)
+#  9:16 Vertical Split-Screen Renderer (NVENC GPU with robust CPU fallback)
 # ═══════════════════════════════════════════════════════════════════════════
 def render_vertical_clip(input_path: str, start: float, duration: float,
                          ass_path: str, output_path: str):
-    safe_ass = ass_path.replace("\\", "/").replace(":", "\\:")
-    # Top 1/3: Crop webcam region (top-left/creator box) → scale to 1080x640
-    # Bottom 2/3: Center crop gameplay → scale to 1080x1280
+    # Copy subtitle to a clean relative path without spaces to prevent path escaping bugs
+    temp_ass = "temp/render_subs.ass"
+    try:
+        shutil.copyfile(ass_path, temp_ass)
+        sub_filter = f",ass={temp_ass}"
+    except Exception:
+        sub_filter = ""
+
+    # Resolution-independent proportional split-screen framing:
+    # Top 35%: Facecam/creator region (proportional to iw/ih) -> scaled to 1080x640
+    # Bottom 65%: Gameplay/content region -> scaled to 1080x1280
     filter_complex = (
-        "[0:v]crop=480:360:20:700,scale=1080:640:force_original_aspect_ratio=increase,crop=1080:640[cam];"
-        "[0:v]crop=1080:1080:(in_w-1080)/2:0,scale=1080:1280[game];"
-        f"[cam][game]vstack=inputs=2,ass='{safe_ass}'[v]"
+        f"[0:v]split=2[cam][game];"
+        f"[cam]crop=w=iw*0.45:h=ih*0.5:x=0:y=0,scale=1080:640:force_original_aspect_ratio=increase,crop=1080:640[c];"
+        f"[game]crop=w=iw:h=ih*0.8:x=0:y=ih*0.2,scale=1080:1280:force_original_aspect_ratio=increase,crop=1080:1280[g];"
+        f"[c][g]vstack=inputs=2{sub_filter}[v]"
     )
-    cmd = [
+
+    # 1. Primary NVENC Hardware Command
+    nvenc_cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-ss", str(start), "-t", str(duration), "-i", input_path,
-        "-filter_complex", filter_complex, "-map", "[v]", "-map", "0:a",
+        "-filter_complex", filter_complex, "-map", "[v]", "-map", "0:a?",
         "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "21",
         "-c:a", "aac", "-b:a", "160k", output_path
     ]
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    res = subprocess.run(nvenc_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if res.returncode != 0:
-        # Fallback to libx264 if NVENC reports error
-        cmd[cmd.index("h264_nvenc")] = "libx264"
-        cmd[cmd.index("p4")] = "fast"
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        log("RENDER", "NVENC notice, rendering with CPU libx264...")
+        # 2. Complete CPU fallback command without invalid -cq flag
+        cpu_cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-ss", str(start), "-t", str(duration), "-i", input_path,
+            "-filter_complex", filter_complex, "-map", "[v]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:a", "aac", "-b:a", "160k", output_path
+        ]
+        subprocess.run(cpu_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -329,13 +375,16 @@ def render_vertical_clip(input_path: str, start: float, duration: float,
 def process_ts_chunk(ts_path: str):
     """Analyzes a recorded .ts chunk for audio peaks, transcribes, and renders viral clips."""
     base_name = os.path.splitext(os.path.basename(ts_path))[0]
-    wav_path = ts_path.replace(".ts", ".wav")
+    wav_path = str(TEMP / f"{base_name}.wav")
 
     # Extract audio track to analyze volume/energy peaks
-    subprocess.run([
+    res_wav = subprocess.run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", ts_path, "-ac", "1", "-ar", "16000", wav_path
-    ], check=True)
+    ], capture_output=True)
+
+    if res_wav.returncode != 0 or not os.path.exists(wav_path):
+        return
 
     try:
         sr, data = wavfile.read(wav_path)
@@ -344,7 +393,9 @@ def process_ts_chunk(ts_path: str):
             os.remove(wav_path)
         return
 
-    os.remove(wav_path)
+    if os.path.exists(wav_path):
+        os.remove(wav_path)
+
     if len(data) < sr * 5:
         return
 
@@ -371,7 +422,7 @@ def process_ts_chunk(ts_path: str):
             last_peak = sec
 
     if not peaks:
-        log("SCORER", f"{base_name} → no high-energy peaks, skipping.")
+        log("SCORER", f"{base_name} -> no high-energy peaks, skipping.")
         return
 
     log("AI", f"Found {len(peaks)} audio reaction peaks in {base_name}. Transcribing speech on CUDA...")
@@ -381,7 +432,7 @@ def process_ts_chunk(ts_path: str):
         duration = 35
 
         # Transcribe candidate window via numpy
-        clip_wav = str(RAW_CHUNKS / f"{base_name}_clip{idx}.wav")
+        clip_wav = str(TEMP / f"{base_name}_clip{idx}.wav")
         subprocess.run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-ss", str(start_sec), "-t", str(duration),
@@ -390,7 +441,8 @@ def process_ts_chunk(ts_path: str):
 
         try:
             clip_sr, clip_data = wavfile.read(clip_wav)
-            os.remove(clip_wav)
+            if os.path.exists(clip_wav):
+                os.remove(clip_wav)
         except Exception:
             continue
 
@@ -414,7 +466,7 @@ def process_ts_chunk(ts_path: str):
 
         if os.path.exists(ass_path):
             os.remove(ass_path)
-        log("EXPORT", f"🌟 FINISHED VIRAL CLIP: {out_mp4}")
+        log("EXPORT", f"[FINISHED] Exported vertical clip -> {out_mp4}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -441,7 +493,7 @@ def _run_test():
     audio_np = data.astype(np.float32) / 32768.0
     segments, _ = whisper_model.transcribe(audio_np, word_timestamps=True)
     segments = list(segments)
-    log("TEST", f"Whisper returned {len(segments)} segments on CUDA ✅")
+    log("TEST", f"Whisper returned {len(segments)} segments on CUDA")
 
     ass_path = str(EXPORTS / "ai_test.ass")
     out_mp4  = str(EXPORTS / "ai_test_clip.mp4")
@@ -470,9 +522,9 @@ Dialogue: 0,0:00:06.00,0:00:08.00,Default,,0,0,0,,INSANE CLUTCH
             os.remove(f)
 
     if os.path.exists(out_mp4) and os.path.getsize(out_mp4) > 1000:
-        log("TEST", f"🎉 Multi-platform AI pipeline PASSED → {out_mp4}")
+        log("TEST", f"[SUCCESS] Multi-platform AI pipeline PASSED -> {out_mp4}")
     else:
-        log("TEST", "❌ Test FAILED")
+        log("TEST", "[FAILED] Test failed")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
