@@ -1,0 +1,37 @@
+# Virtual Environment
+.venv/
+env/
+venv/
+ENV/
+
+# Python cache & build
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Video stream chunks & temp work files
+raw_chunks/*
+!raw_chunks/.gitkeep
+temp/*
+!temp/.gitkeep
+
+# Exported clips (avoid committing large media binaries)
+exports/*.mp4
+exports/*.ass
+exports/*.wav
+!exports/.gitkeep
+
+fallback_exports/*.mp4
+fallback_exports/*.wav
+!fallback_exports/.gitkeep
+
+# System & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
