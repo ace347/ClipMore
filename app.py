@@ -103,16 +103,34 @@ def log_reader_thread(proc: subprocess.Popen):
         state.append_log("[SYSTEM] Clipper process terminated.")
 
 
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+_last_gpu_check = 0.0
+_cached_gpu_info = {"available": False, "name": "NVIDIA GPU Not Detected", "memory_total": "N/A", "memory_used": "N/A", "utilization": "0%", "temp": "N/A"}
+
 def get_gpu_info() -> dict:
-    """Queries nvidia-smi for real-time GPU stats."""
+    """Queries nvidia-smi for real-time GPU stats (cached for 4 seconds, silent background execution)."""
+    global _last_gpu_check, _cached_gpu_info
+    now = time.time()
+    if now - _last_gpu_check < 4.0:
+        return _cached_gpu_info
+    _last_gpu_check = now
+
     try:
         cmd = ["nvidia-smi", "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
                "--format=csv,noheader,nounits"]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=2,
+            creationflags=CREATE_NO_WINDOW
+        )
         if res.returncode == 0 and res.stdout.strip():
             parts = [p.strip() for p in res.stdout.strip().split(",")]
             if len(parts) >= 5:
-                return {
+                _cached_gpu_info = {
                     "available": True,
                     "name": parts[0],
                     "memory_total": f"{parts[1]} MB",
@@ -120,9 +138,10 @@ def get_gpu_info() -> dict:
                     "utilization": f"{parts[3]}%",
                     "temp": f"{parts[4]}°C"
                 }
+                return _cached_gpu_info
     except Exception:
         pass
-    return {"available": False, "name": "NVIDIA GPU Not Detected", "memory_total": "N/A", "memory_used": "N/A", "utilization": "0%", "temp": "N/A"}
+    return _cached_gpu_info
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +219,8 @@ async def start_ai_clipper(req: StartAIRequest):
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        cwd=str(PROJECT_ROOT)
+        cwd=str(PROJECT_ROOT),
+        creationflags=CREATE_NO_WINDOW
     )
     state.process = proc
 
@@ -235,7 +255,8 @@ async def start_fallback_clipper(req: StartFallbackRequest):
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        cwd=str(PROJECT_ROOT)
+        cwd=str(PROJECT_ROOT),
+        creationflags=CREATE_NO_WINDOW
     )
     state.process = proc
 
@@ -263,7 +284,8 @@ async def run_pipeline_test():
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        cwd=str(PROJECT_ROOT)
+        cwd=str(PROJECT_ROOT),
+        creationflags=CREATE_NO_WINDOW
     )
     state.process = proc
 
@@ -279,7 +301,7 @@ async def stop_clipper():
         state.append_log("[SYSTEM] User sent stop signal. Terminating process tree...")
         try:
             # Kill process tree on Windows
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(state.process.pid)], capture_output=True)
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(state.process.pid)], capture_output=True, creationflags=CREATE_NO_WINDOW)
         except Exception as e:
             state.process.kill()
         state.mode = "idle"

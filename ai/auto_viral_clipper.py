@@ -47,6 +47,8 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 def _bootstrap_cuda_and_ffmpeg():
@@ -223,7 +225,7 @@ def start_capture_process(stream_url: str):
                 "-f", "bestvideo[vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=avc]+bestaudio/bestvideo+bestaudio/best",
                 stream_url
             ]
-            res = subprocess.run(cmd_url, capture_output=True, text=True, timeout=15)
+            res = subprocess.run(cmd_url, capture_output=True, text=True, timeout=15, creationflags=CREATE_NO_WINDOW)
             urls = [u.strip() for u in res.stdout.split("\n") if u.strip().startswith("http")]
 
             if len(urls) == 2:
@@ -239,7 +241,7 @@ def start_capture_process(stream_url: str):
                     "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1",
                     chunk_pattern
                 ]
-                return subprocess.Popen(ffmpeg_cmd)
+                return subprocess.Popen(ffmpeg_cmd, creationflags=CREATE_NO_WINDOW)
             elif len(urls) == 1:
                 log("CAPTURE", "Resolved single stream URL. Connecting FFmpeg segmenter...")
                 ffmpeg_cmd = [
@@ -250,7 +252,7 @@ def start_capture_process(stream_url: str):
                     "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1",
                     chunk_pattern
                 ]
-                return subprocess.Popen(ffmpeg_cmd)
+                return subprocess.Popen(ffmpeg_cmd, creationflags=CREATE_NO_WINDOW)
         except Exception as e:
             log("CAPTURE", f"Direct URL resolution notice: {e}, falling back to pipe...")
 
@@ -258,12 +260,14 @@ def start_capture_process(stream_url: str):
         log("CAPTURE", "Streaming YouTube through yt-dlp pipe -> FFmpeg...")
         p1 = subprocess.Popen(
             [sys.executable, "-m", "yt_dlp", "-o", "-", "-f", "bestvideo[vcodec^=avc]+bestaudio/best", "--no-warnings", stream_url],
-            stdout=subprocess.PIPE
+            stdout=subprocess.PIPE,
+            creationflags=CREATE_NO_WINDOW
         )
         p2 = subprocess.Popen(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-i", "pipe:0",
              "-c:v", "copy", "-c:a", "aac", "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1", chunk_pattern],
-            stdin=p1.stdout
+            stdin=p1.stdout,
+            creationflags=CREATE_NO_WINDOW
         )
         p1.stdout.close()
         return p2
@@ -273,12 +277,14 @@ def start_capture_process(stream_url: str):
         log("CAPTURE", f"Piping live stream via streamlink -> FFmpeg for: {stream_url}...")
         p1 = subprocess.Popen(
             [sys.executable, "-m", "streamlink", "--stdout", stream_url, "best,720p,worst"],
-            stdout=subprocess.PIPE
+            stdout=subprocess.PIPE,
+            creationflags=CREATE_NO_WINDOW
         )
         p2 = subprocess.Popen(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-i", "pipe:0",
              "-c", "copy", "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1", chunk_pattern],
-            stdin=p1.stdout
+            stdin=p1.stdout,
+            creationflags=CREATE_NO_WINDOW
         )
         p1.stdout.close()
         return p2
@@ -355,7 +361,7 @@ def render_vertical_clip(input_path: str, start: float, duration: float,
         "-c:a", "aac", "-b:a", "160k", output_path
     ]
 
-    res = subprocess.run(nvenc_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    res = subprocess.run(nvenc_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
     if res.returncode != 0:
         log("RENDER", "NVENC notice, rendering with CPU libx264...")
         # 2. Complete CPU fallback command without invalid -cq flag
@@ -366,7 +372,7 @@ def render_vertical_clip(input_path: str, start: float, duration: float,
             "-c:v", "libx264", "-preset", "fast", "-crf", "22",
             "-c:a", "aac", "-b:a", "160k", output_path
         ]
-        subprocess.run(cpu_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(cpu_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -381,7 +387,7 @@ def process_ts_chunk(ts_path: str):
     res_wav = subprocess.run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", ts_path, "-ac", "1", "-ar", "16000", wav_path
-    ], capture_output=True)
+    ], capture_output=True, creationflags=CREATE_NO_WINDOW)
 
     if res_wav.returncode != 0 or not os.path.exists(wav_path):
         return
@@ -437,7 +443,7 @@ def process_ts_chunk(ts_path: str):
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-ss", str(start_sec), "-t", str(duration),
             "-i", ts_path, "-ac", "1", "-ar", "16000", clip_wav
-        ], check=True)
+        ], check=True, creationflags=CREATE_NO_WINDOW)
 
         try:
             clip_sr, clip_data = wavfile.read(clip_wav)

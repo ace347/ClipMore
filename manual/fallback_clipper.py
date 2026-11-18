@@ -50,12 +50,14 @@ def log(tag, msg):
     print(f"[{datetime.now():%H:%M:%S}] [{tag}] {msg}", flush=True)
 
 
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 def _nvenc_ok() -> bool:
     try:
         return subprocess.run(
             ["ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.2:r=30",
              "-pix_fmt", "yuv420p", "-c:v", "h264_nvenc", "-f", "null", "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, creationflags=CREATE_NO_WINDOW
         ).returncode == 0
     except Exception:
         return False
@@ -72,7 +74,7 @@ def fallback_clip(video_path: str, max_clips: int = 5):
     subprocess.run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", video_path, "-ac", "1", "-ar", "16000", wav_path
-    ], check=True)
+    ], check=True, creationflags=CREATE_NO_WINDOW)
 
     from scipy.io import wavfile
     sr, data = wavfile.read(wav_path)
@@ -141,12 +143,12 @@ def fallback_clip(video_path: str, max_clips: int = 5):
         ]
 
         log("EXPORT", f"Exporting fallback clip {saved_clips} at {timestamp_sec}s...")
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
         if res.returncode != 0:
             # Fallback to libx264
             cmd[cmd.index(encoder)] = "libx264"
             cmd[cmd.index(preset)] = "fast"
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
 
         last_exported_sec = timestamp_sec
         saved_clips += 1
