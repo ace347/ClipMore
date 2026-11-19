@@ -164,6 +164,34 @@
           </div>
         </div>
 
+        <!-- Clip layout -->
+        <div class="pt-2 border-t border-gray-800/80">
+          <label class="block text-xs font-semibold text-gray-300 mb-1.5">Clip Layout</label>
+          <select id="ai-layout" class="w-full bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-200 outline-none focus:border-cyan-500">
+            <option value="split" selected>Split-screen: webcam on top, gameplay below</option>
+            <option value="blur">Main clip in front, blurred background</option>
+            <option value="square_blur">Square clip in the middle, blurred background</option>
+            <option value="center">Full screen: center crop (no background)</option>
+            <option value="left">Full screen: focus on the left side</option>
+            <option value="right">Full screen: focus on the right side</option>
+            <option value="zoom">Full screen: zoomed in (punch-in)</option>
+            <option value="fit">Full width on black bars (nothing cropped)</option>
+            <option value="feed">Instagram feed 4:5 (center crop)</option>
+            <option value="square">Square 1:1 (center crop)</option>
+            <option value="original">Original shape: trim only</option>
+          </select>
+          <div class="flex items-center gap-4 mt-3">
+            <div class="flex-shrink-0 text-center">
+              <canvas id="ai-layout-preview" class="rounded-lg border border-gray-800 bg-black" style="height:192px"></canvas>
+              <p id="ai-layout-src" class="text-[9px] text-gray-500 mt-1">Sample picture</p>
+            </div>
+            <div class="min-w-0">
+              <p id="ai-layout-desc" class="text-xs text-gray-300"></p>
+              <p class="text-[10px] text-gray-500 mt-2">Applies to clips made from now on. The picture shows roughly how the finished clip will be framed.</p>
+            </div>
+          </div>
+        </div>
+
         <!-- Action Buttons -->
         <div class="flex items-center space-x-3 pt-3">
           <button id="btn-start-ai" onclick="startAIClipper()" class="flex-1 flex items-center justify-center space-x-2 py-3 px-6 rounded-xl font-bold text-sm bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white shadow-lg shadow-emerald-500/20 transition transform active:scale-[0.98]">
@@ -369,10 +397,24 @@
             <label class="block text-xs font-semibold text-gray-300 mb-1.5">Vertical Layout</label>
             <select id="manual-layout" class="w-full bg-gray-950 border border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-200 outline-none focus:border-violet-500">
               <option value="split" selected>Split-screen: webcam on top, gameplay below</option>
-              <option value="center">Center crop: 9:16 from the middle</option>
-              <option value="blur">Blurred background: full frame fitted</option>
+              <option value="blur">Main clip in front, blurred background</option>
+              <option value="square_blur">Square clip in the middle, blurred background</option>
+              <option value="center">Full screen: center crop (no background)</option>
+              <option value="left">Full screen: focus on the left side</option>
+              <option value="right">Full screen: focus on the right side</option>
+              <option value="zoom">Full screen: zoomed in (punch-in)</option>
+              <option value="fit">Full width on black bars (nothing cropped)</option>
+              <option value="feed">Instagram feed 4:5 (center crop)</option>
+              <option value="square">Square 1:1 (center crop)</option>
               <option value="original">Original shape: trim only</option>
             </select>
+            <div class="flex items-center gap-3 mt-3">
+              <div class="flex-shrink-0 text-center">
+                <canvas id="manual-layout-preview" class="rounded-lg border border-gray-800 bg-black" style="height:192px"></canvas>
+                <p id="manual-layout-src" class="text-[9px] text-gray-500 mt-1">Sample picture</p>
+              </div>
+              <p id="manual-layout-desc" class="text-[11px] text-gray-300 min-w-0"></p>
+            </div>
           </div>
           <div>
             <label class="block text-xs font-semibold text-gray-300 mb-1.5">Clip Name <span class="text-gray-500 font-normal">(optional)</span></label>
@@ -516,6 +558,7 @@
           document.getElementById('gpu-badge').classList.remove('hidden');
           document.getElementById('gpu-name').textContent = data.gpu.name;
           document.getElementById('gpu-util').textContent = data.gpu.utilization;
+          document.getElementById('gpu-badge').title = `Busiest reading in the last 5s · GPU ${data.gpu.gpu_util || '-'} · Video encoder ${data.gpu.encoder_util || '-'} · Video decoder ${data.gpu.decoder_util || '-'} · VRAM ${data.gpu.memory_used}/${data.gpu.memory_total}`;
         }
 
         // Engine Status
@@ -592,7 +635,7 @@
         const res = await fetch('/api/ai/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, threshold, model })
+          body: JSON.stringify({ url, threshold, model, layout: document.getElementById('ai-layout').value })
         });
         const data = await res.json();
         if (res.ok) {
@@ -1416,7 +1459,7 @@
     // Remember your choices between sessions
     (function initPrefs() {
       const KEY = 'clipmore.manual.prefs';
-      const ids = ['manual-layout', 'chat-sens', 'manual-speed', 'live-backfill'];
+      const ids = ['manual-layout', 'ai-layout', 'chat-sens', 'manual-speed', 'live-backfill'];
       const checks = ['loop-preview', 'chat-notify'];
       const save = () => {
         try {
@@ -1433,6 +1476,145 @@
         setSpeed($m('manual-speed').value);
       } catch (e) {}
       [...ids, ...checks].forEach(id => $m(id).addEventListener('change', save));
+    })();
+
+    // ------------------------------------------------------------------
+    // Layout previews: a small picture of how the clip will be framed
+    // ------------------------------------------------------------------
+    // [title, description, aspect ratio (0 = same as the video)]
+    const LAYOUT_INFO = {
+      split:       ['Split-screen', 'Webcam strip on top, gameplay below. Needs a webcam in the bottom-left corner of the stream.', 9 / 16],
+      blur:        ['Blurred background', 'The whole frame sits in front of a blurred copy of itself.', 9 / 16],
+      square_blur: ['Square on blur', 'A square crop of the action in the middle, over a blurred background.', 9 / 16],
+      center:      ['Center crop', 'The middle of the frame fills the whole screen. No background.', 9 / 16],
+      left:        ['Focus left', 'Full screen, cropped toward the left side of the frame.', 9 / 16],
+      right:       ['Focus right', 'Full screen, cropped toward the right side of the frame.', 9 / 16],
+      zoom:        ['Zoomed in', 'Full screen, punched in about 30% for extra impact.', 9 / 16],
+      fit:         ['Black bars', 'The whole frame at full width, nothing cropped, on black.', 9 / 16],
+      feed:        ['Instagram feed 4:5', 'A 4:5 crop from the middle, for feed posts.', 4 / 5],
+      square:      ['Square 1:1', 'A square crop from the middle.', 1],
+      original:    ['Original shape', 'No reframing. The clip is only trimmed.', 0]
+    };
+
+    let _sampleScene = null;
+    // A made-up 16:9 game frame with labelled left / center / right areas and a webcam box,
+    // so every crop is easy to read even before any video is loaded.
+    function sampleScene() {
+      if (_sampleScene) return _sampleScene;
+      const c = document.createElement('canvas');
+      c.width = 1920; c.height = 1080;
+      const g = c.getContext('2d');
+      const bg = g.createLinearGradient(0, 0, 1920, 1080);
+      bg.addColorStop(0, '#1e1b4b'); bg.addColorStop(1, '#0e7490');
+      g.fillStyle = bg; g.fillRect(0, 0, 1920, 1080);
+      g.strokeStyle = 'rgba(255,255,255,0.12)'; g.lineWidth = 3;
+      for (let x = 0; x <= 1920; x += 160) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, 1080); g.stroke(); }
+      for (let y = 0; y <= 1080; y += 160) { g.beginPath(); g.moveTo(0, y); g.lineTo(1920, y); g.stroke(); }
+      g.fillStyle = 'rgba(0,0,0,0.25)'; g.fillRect(0, 840, 1920, 240);
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = '#f97316'; g.beginPath(); g.arc(960, 500, 220, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#fff'; g.font = 'bold 110px sans-serif'; g.fillText('ACTION', 960, 500);
+      g.fillStyle = '#facc15'; g.fillRect(90, 160, 420, 190);
+      g.fillStyle = '#111'; g.font = 'bold 130px sans-serif'; g.fillText('LEFT', 300, 255);
+      g.fillStyle = '#f472b6'; g.fillRect(1410, 160, 420, 190);
+      g.fillStyle = '#111'; g.fillText('RIGHT', 1620, 255);
+      g.fillStyle = '#111827'; g.fillRect(20, 700, 480, 360);
+      g.strokeStyle = '#facc15'; g.lineWidth = 10; g.strokeRect(20, 700, 480, 360);
+      g.fillStyle = '#fbbf24'; g.beginPath(); g.arc(260, 830, 80, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#60a5fa'; g.beginPath(); g.ellipse(260, 1030, 150, 100, 0, Math.PI, 0); g.fill();
+      g.fillStyle = '#fff'; g.font = 'bold 60px sans-serif'; g.fillText('CAM', 260, 745);
+      g.fillStyle = '#22c55e'; g.fillRect(40, 40, 560, 36);
+      _sampleScene = c;
+      return c;
+    }
+
+    // Draws src so it covers the destination rectangle (cropping the overflow).
+    // fx: 0 = keep the left edge, 0.5 = middle, 1 = keep the right edge. region: [x, y, w, h] of src to use.
+    function drawCover(g, src, sw, sh, dx, dy, dw, dh, fx = 0.5, zoom = 1, region = null) {
+      const [rx, ry, rw, rh] = region || [0, 0, sw, sh];
+      const scale = Math.max(dw / rw, dh / rh) * zoom;
+      const vw = dw / scale, vh = dh / scale;
+      g.drawImage(src, rx + (rw - vw) * fx, ry + (rh - vh) / 2, vw, vh, dx, dy, dw, dh);
+    }
+
+    function drawContain(g, src, sw, sh, dx, dy, dw, dh) {
+      const s = Math.min(dw / sw, dh / sh);
+      g.drawImage(src, dx + (dw - sw * s) / 2, dy + (dh - sh * s) / 2, sw * s, sh * s);
+    }
+
+    function drawLayoutPreview(canvas, layout, src, sw, sh) {
+      const info = LAYOUT_INFO[layout] || LAYOUT_INFO.split;
+      const H = 192, W = Math.round(H * (info[2] || sw / sh));
+      const dpr = window.devicePixelRatio || 1;
+      canvas.style.height = H + 'px';
+      canvas.style.width = W + 'px';
+      canvas.width = Math.round(W * dpr);
+      canvas.height = Math.round(H * dpr);
+      const g = canvas.getContext('2d');
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+
+      const blurredBg = () => {
+        g.filter = 'blur(6px) brightness(0.75)';
+        drawCover(g, src, sw, sh, -8, -8, W + 16, H + 16);
+        g.filter = 'none';
+      };
+
+      if (layout === 'split') {
+        // like the real thing: the frame is first made 16:9, then a webcam strip and a gameplay square are cut out
+        const norm = document.createElement('canvas');
+        norm.width = 960; norm.height = 540;
+        drawCover(norm.getContext('2d'), src, sw, sh, 0, 0, 960, 540);
+        drawCover(g, norm, 960, 540, 0, 0, W, H / 3, 0.5, 1, [10, 350, 240, 180]);
+        drawCover(g, norm, 960, 540, 0, H / 3, W, H * 2 / 3, 0.5, 1, [210, 0, 540, 540]);
+      } else if (layout === 'blur') {
+        blurredBg();
+        drawContain(g, src, sw, sh, 0, 0, W, H);
+      } else if (layout === 'square_blur') {
+        blurredBg();
+        drawCover(g, src, sw, sh, 0, (H - W) / 2, W, W);
+      } else if (layout === 'fit') {
+        drawContain(g, src, sw, sh, 0, 0, W, H);
+      } else if (layout === 'left') {
+        drawCover(g, src, sw, sh, 0, 0, W, H, 0);
+      } else if (layout === 'right') {
+        drawCover(g, src, sw, sh, 0, 0, W, H, 1);
+      } else if (layout === 'zoom') {
+        drawCover(g, src, sw, sh, 0, 0, W, H, 0.5, 1.3);
+      } else {   // center, feed, square, original
+        drawCover(g, src, sw, sh, 0, 0, W, H);
+      }
+    }
+
+    function refreshLayoutPreviews() {
+      const mv = $m('manual-video');
+      const haveFrame = mv && mv.readyState >= 2 && mv.videoWidth > 0;
+      const pairs = [['ai-layout', 'ai-layout-preview', 'ai-layout-desc', 'ai-layout-src', false],
+                     ['manual-layout', 'manual-layout-preview', 'manual-layout-desc', 'manual-layout-src', true]];
+      for (const [sel, cv, desc, srcLabel, useVideo] of pairs) {
+        const layout = $m(sel).value;
+        const info = LAYOUT_INFO[layout] || LAYOUT_INFO.split;
+        $m(desc).textContent = info[0] + ': ' + info[1];
+        let real = useVideo && haveFrame;
+        try {
+          if (real) drawLayoutPreview($m(cv), layout, mv, mv.videoWidth, mv.videoHeight);
+          else drawLayoutPreview($m(cv), layout, sampleScene(), 1920, 1080);
+        } catch (e) {
+          real = false;
+          try { drawLayoutPreview($m(cv), layout, sampleScene(), 1920, 1080); } catch (e2) {}
+        }
+        $m(srcLabel).textContent = real ? 'From your video' : 'Sample picture';
+      }
+    }
+
+    (function initLayoutPreviews() {
+      const mv = $m('manual-video');
+      $m('ai-layout').addEventListener('change', refreshLayoutPreviews);
+      $m('manual-layout').addEventListener('change', refreshLayoutPreviews);
+      let last = 0;
+      const soft = () => { const t = Date.now(); if (t - last > 400) { last = t; if (activeTab === 'manual') refreshLayoutPreviews(); } };
+      ['loadeddata', 'seeked', 'timeupdate'].forEach(ev => mv.addEventListener(ev, soft));
+      refreshLayoutPreviews();
     })();
 
     // After a page refresh, re-attach to a recording that is still running

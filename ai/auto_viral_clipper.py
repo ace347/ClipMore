@@ -88,6 +88,21 @@ RAW_CHUNKS   = PROJECT_ROOT / "raw_chunks"
 EXPORTS      = PROJECT_ROOT / "exports"
 TEMP         = PROJECT_ROOT / "temp"
 
+# Every run gets its own chunk names. Without this, chunks left over from an earlier stream
+# (raw_chunks/chunk_0000.ts ...) were picked up and clipped as if they were the new stream.
+from datetime import datetime as _dt
+SESSION_ID     = _dt.now().strftime("%Y%m%d_%H%M%S")
+SESSION_PREFIX = f"{SESSION_ID}_"
+
+# Record YouTube at 720p or lower. The 1080p60 feed (~5.5 Mbit/s) downloaded far slower than real time
+# on a normal connection, so no chunk was ever finished and no clip was ever made.
+MAX_CAPTURE_HEIGHT = 720
+
+# Clip layout (blurred background, full screen, split-screen ...). Chosen in the app, passed as --layout.
+sys.path.insert(0, str(PROJECT_ROOT))
+from layouts import FILTERS as LAYOUT_FILTERS, SIZES as LAYOUT_SIZES
+LAYOUT = "split"
+
 os.makedirs(RAW_CHUNKS, exist_ok=True)
 os.makedirs(EXPORTS, exist_ok=True)
 os.makedirs(TEMP, exist_ok=True)
@@ -214,7 +229,7 @@ def start_capture_process(stream_url: str):
     Uses yt-dlp for YouTube, and streamlink for Twitch/Kick.
     """
     is_youtube = "youtube.com" in stream_url.lower() or "youtu.be" in stream_url.lower()
-    chunk_pattern = str(RAW_CHUNKS / "chunk_%04d.ts")
+    chunk_pattern = str(RAW_CHUNKS / f"{SESSION_PREFIX}chunk_%04d.ts")
 
     if is_youtube:
         log("CAPTURE", f"Resolving YouTube stream via yt-dlp for: {stream_url}")
@@ -222,7 +237,7 @@ def start_capture_process(stream_url: str):
             # Prefer AVC/H.264 video + AAC audio so MPEG-TS muxer recognizes streams cleanly
             cmd_url = [
                 sys.executable, "-m", "yt_dlp", "-g", "--no-warnings",
-                "-f", "bestvideo[vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=avc]+bestaudio/bestvideo+bestaudio/best",
+                "-f", f"bestvideo[height<={MAX_CAPTURE_HEIGHT}][vcodec^=avc]+bestaudio/bestvideo[height<={MAX_CAPTURE_HEIGHT}]+bestaudio/bestvideo+bestaudio/best",
                 stream_url
             ]
             res = subprocess.run(cmd_url, capture_output=True, text=True, timeout=15, creationflags=CREATE_NO_WINDOW)
@@ -233,9 +248,9 @@ def start_capture_process(stream_url: str):
                 log("CAPTURE", "Resolved video and audio feeds. Connecting FFmpeg segmenter...")
                 ffmpeg_cmd = [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
-                    "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+                    # No -reconnect_* flags here: on YouTube's HLS feeds they made ffmpeg re-request every segment
+                    # in an endless loop, so no video was ever written. HLS already retries segments by itself.
                     "-i", v_url,
-                    "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
                     "-i", a_url,
                     "-c:v", "copy", "-c:a", "aac",
                     "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1",
@@ -246,7 +261,6 @@ def start_capture_process(stream_url: str):
                 log("CAPTURE", "Resolved single stream URL. Connecting FFmpeg segmenter...")
                 ffmpeg_cmd = [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
-                    "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
                     "-i", urls[0],
                     "-c", "copy",
                     "-f", "segment", "-segment_time", "180", "-reset_timestamps", "1",
@@ -259,7 +273,7 @@ def start_capture_process(stream_url: str):
         # Pipe fallback with yt-dlp
         log("CAPTURE", "Streaming YouTube through yt-dlp pipe -> FFmpeg...")
         p1 = subprocess.Popen(
-            [sys.executable, "-m", "yt_dlp", "-o", "-", "-f", "bestvideo[vcodec^=avc]+bestaudio/best", "--no-warnings", stream_url],
+            [sys.executable, "-m", "yt_dlp", "-o", "-", "-f", f"bestvideo[height<={MAX_CAPTURE_HEIGHT}][vcodec^=avc]+bestaudio/best[height<={MAX_CAPTURE_HEIGHT}]/best", "--no-warnings", stream_url],
             stdout=subprocess.PIPE,
             creationflags=CREATE_NO_WINDOW
         )
@@ -293,7 +307,7 @@ def start_capture_process(stream_url: str):
 # ═══════════════════════════════════════════════════════════════════════════
 #  .ass Subtitle Generator (3 uppercase words per line, viral TikTok style)
 # ═══════════════════════════════════════════════════════════════════════════
-def generate_ass_file(segments, start_offset: float, ass_path: str):
+def generate_ass_file(segments, start_offset: float, ass_path: str, res=(1080, 1920)):
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -306,6 +320,8 @@ Style: Default,Arial Black,68,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    header = header.replace("PlayResX: 1080", f"PlayResX: {res[0]}").replace("PlayResY: 1920", f"PlayResY: {res[1]}")
+
     def fmt_t(t):
         t = max(0.0, t - start_offset)
         h = int(t // 3600)
@@ -351,6 +367,11 @@ def render_vertical_clip(input_path: str, start: float, duration: float,
         f"[game]crop=w=iw:h=ih*0.8:x=0:y=ih*0.2,scale=1080:1280:force_original_aspect_ratio=increase,crop=1080:1280[g];"
         f"[c][g]vstack=inputs=2{sub_filter}[v]"
     )
+
+    # Any layout other than the built-in split-screen comes from layouts.py; captions go on top of it
+    if LAYOUT != "split" and LAYOUT in LAYOUT_FILTERS:
+        base = LAYOUT_FILTERS[LAYOUT]
+        filter_complex = (base[:-3] + f"[vpre];[vpre]{sub_filter[1:]}[v]") if sub_filter else base
 
     # 1. Primary NVENC Hardware Command
     nvenc_cmd = [
@@ -467,7 +488,7 @@ def process_ts_chunk(ts_path: str):
         ass_path = str(EXPORTS / f"{base_name}_clip{idx}.ass")
         out_mp4  = str(EXPORTS / f"{base_name}_clip{idx}.mp4")
 
-        generate_ass_file(segments, 0.0, ass_path)
+        generate_ass_file(segments, 0.0, ass_path, LAYOUT_SIZES.get(LAYOUT, (1080, 1920)))
         render_vertical_clip(ts_path, start_sec, duration, ass_path, out_mp4)
 
         if os.path.exists(ass_path):
@@ -541,6 +562,16 @@ if __name__ == "__main__":
         _run_test()
         sys.exit(0)
 
+    if "--layout" in sys.argv:
+        _i = sys.argv.index("--layout")
+        if _i + 1 < len(sys.argv):
+            if sys.argv[_i + 1] in LAYOUT_FILTERS:
+                LAYOUT = sys.argv[_i + 1]
+            del sys.argv[_i:_i + 2]
+        else:
+            del sys.argv[_i]
+    log("SYSTEM", f"Clip layout: {LAYOUT}")
+
     url = sys.argv[1] if len(sys.argv) > 1 else input("Enter Stream URL (YouTube, Twitch, or Kick): ")
 
     # Thread A: Live Chat Velocity Monitor
@@ -548,20 +579,27 @@ if __name__ == "__main__":
 
     # Thread B: Stream Ingestion via yt-dlp (YouTube) or streamlink (Twitch)
     log("SYSTEM", f"Starting multi-platform stream capture for: {url}")
+    log("SYSTEM", f"Session {SESSION_ID}: the first clip appears after the first 3-minute chunk is recorded.")
     capture_proc = start_capture_process(url)
 
     log("SYSTEM", "Thread A (Chat Velocity) + Thread B (Capture & Scorer) are running.")
     log("SYSTEM", f"Finished clips will appear in: {EXPORTS}")
 
     processed = set()
+    started_at = time.time()
+    warned_empty = False
     try:
         while True:
-            files = sorted(f for f in os.listdir(RAW_CHUNKS) if f.endswith(".ts"))
+            # Only this run's chunks; leftovers from earlier streams are ignored
+            files = sorted(f for f in os.listdir(RAW_CHUNKS) if f.startswith(SESSION_PREFIX) and f.endswith(".ts"))
             for f in files[:-1]:
                 full_path = os.path.join(str(RAW_CHUNKS), f)
                 if full_path not in processed:
                     process_ts_chunk(full_path)
                     processed.add(full_path)
+            if not files and not warned_empty and time.time() - started_at > 120:
+                warned_empty = True
+                log("CAPTURE", "No video recorded after 2 minutes. The stream may be offline, or the connection is too slow for this stream.")
             time.sleep(10)
     except KeyboardInterrupt:
         log("SYSTEM", "Stopping clipper...")

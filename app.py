@@ -127,42 +127,78 @@ def log_reader_thread(proc: subprocess.Popen):
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
-_last_gpu_check = 0.0
 _cached_gpu_info = {"available": False, "name": "NVIDIA GPU Not Detected", "memory_total": "N/A", "memory_used": "N/A", "utilization": "0%", "temp": "N/A"}
+_gpu_samples = []          # (time, gpu %, encoder %, decoder %) for the last few seconds
+_gpu_sampler_started = False
+_GPU_PEAK_WINDOW_S = 5.0
+
+
+def _num(x) -> float:
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0      # "[N/A]" and similar
+
+
+def _query_nvidia_smi():
+    """One nvidia-smi reading, or None. Falls back to fewer fields if this driver lacks encoder/decoder stats."""
+    queries = (
+        "name,memory.total,memory.used,utilization.gpu,utilization.encoder,utilization.decoder,temperature.gpu",
+        "name,memory.total,memory.used,utilization.gpu,temperature.gpu",
+    )
+    for q in queries:
+        try:
+            res = subprocess.run(
+                ["nvidia-smi", f"--query-gpu={q}", "--format=csv,noheader,nounits"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3,
+                creationflags=CREATE_NO_WINDOW
+            )
+        except Exception:
+            return None
+        if res.returncode != 0 or not res.stdout.strip():
+            continue
+        parts = [p.strip() for p in res.stdout.strip().splitlines()[0].split(",")]
+        if len(parts) == 7:
+            return {"name": parts[0], "mem_total": parts[1], "mem_used": parts[2], "gpu": _num(parts[3]),
+                    "enc": _num(parts[4]), "dec": _num(parts[5]), "temp": parts[6]}
+        if len(parts) == 5:
+            return {"name": parts[0], "mem_total": parts[1], "mem_used": parts[2], "gpu": _num(parts[3]),
+                    "enc": 0.0, "dec": 0.0, "temp": parts[4]}
+    return None
+
+
+def _gpu_sampler_loop():
+    """Reads the GPU once a second. A single reading often lands between short bursts of work
+    (speech recognition, rendering) and shows 0%, so the badge shows the busiest recent reading."""
+    global _cached_gpu_info
+    while True:
+        r = _query_nvidia_smi()
+        now = time.time()
+        if r:
+            _gpu_samples.append((now, r["gpu"], r["enc"], r["dec"]))
+            while _gpu_samples and now - _gpu_samples[0][0] > _GPU_PEAK_WINDOW_S:
+                _gpu_samples.pop(0)
+            peak = max(max(s[1], s[2], s[3]) for s in _gpu_samples)   # video encode/decode don't count in 'gpu'
+            _cached_gpu_info = {
+                "available": True,
+                "name": r["name"],
+                "memory_total": f"{r['mem_total']} MB",
+                "memory_used": f"{r['mem_used']} MB",
+                "utilization": f"{int(round(peak))}%",
+                "gpu_util": f"{int(round(max(s[1] for s in _gpu_samples)))}%",
+                "encoder_util": f"{int(round(max(s[2] for s in _gpu_samples)))}%",
+                "decoder_util": f"{int(round(max(s[3] for s in _gpu_samples)))}%",
+                "temp": f"{r['temp']}°C"
+            }
+        time.sleep(1.0)
+
 
 def get_gpu_info() -> dict:
-    """Queries nvidia-smi for real-time GPU stats (cached for 4 seconds, silent background execution)."""
-    global _last_gpu_check, _cached_gpu_info
-    now = time.time()
-    if now - _last_gpu_check < 4.0:
-        return _cached_gpu_info
-    _last_gpu_check = now
-
-    try:
-        cmd = ["nvidia-smi", "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
-               "--format=csv,noheader,nounits"]
-        res = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=2,
-            creationflags=CREATE_NO_WINDOW
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            parts = [p.strip() for p in res.stdout.strip().split(",")]
-            if len(parts) >= 5:
-                _cached_gpu_info = {
-                    "available": True,
-                    "name": parts[0],
-                    "memory_total": f"{parts[1]} MB",
-                    "memory_used": f"{parts[2]} MB",
-                    "utilization": f"{parts[3]}%",
-                    "temp": f"{parts[4]}°C"
-                }
-                return _cached_gpu_info
-    except Exception:
-        pass
+    """Latest GPU stats from the background sampler (started on first use)."""
+    global _gpu_sampler_started
+    if not _gpu_sampler_started:
+        _gpu_sampler_started = True
+        threading.Thread(target=_gpu_sampler_loop, daemon=True).start()
     return _cached_gpu_info
 
 
@@ -173,6 +209,7 @@ class StartAIRequest(BaseModel):
     url: str
     threshold: float = 2.5
     model: str = "small.en"
+    layout: str = "split"     # any name from layouts.py
 
 
 class StartFallbackRequest(BaseModel):
@@ -247,7 +284,10 @@ async def start_ai_clipper(req: StartAIRequest):
     state.start_time = time.time()
     state.append_log(f"[SYSTEM] Launching Autonomous AI Clipper for: {url}")
 
-    cmd = [python_exe, str(script_path), url]
+    from layouts import FILTERS as _LAYOUTS
+    layout = req.layout if req.layout in _LAYOUTS else "split"
+    state.append_log(f"[SYSTEM] Clip layout: {layout}")
+    cmd = [python_exe, str(script_path), url, "--layout", layout]
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -310,27 +350,10 @@ VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".ts", ".flv", ".avi", ".m4v"}
 MAX_MANUAL_CLIP_SECONDS = 600
 _manual_lock = threading.Lock()
 
-MANUAL_FILTERS = {
-    # Webcam strip on top, gameplay below (same look as the DSP clipper).
-    # The source is normalised to 1920x1080 first so the fixed crops always fit.
-    "split": (
-        "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,split=2[s1][s2];"
-        "[s1]crop=480:360:20:700,scale=1080:640:force_original_aspect_ratio=increase,crop=1080:640[cam];"
-        "[s2]crop=1080:1080:(in_w-1080)/2:0,scale=1080:1280[game];"
-        "[cam][game]vstack=inputs=2[v]"
-    ),
-    # Plain centre crop to 9:16.
-    "center": "[0:v]crop=ih*9/16:ih,scale=1080:1920,setsar=1[v]",
-    # Whole frame kept, fitted to the width over a blurred copy of itself.
-    "blur": (
-        "[0:v]split=2[a][b];"
-        "[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];"
-        "[b]scale=1080:-2[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v]"
-    ),
-    # No reframing: keep the original shape, just trim.
-    "original": "[0:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[v]",
-}
+# All short-video layouts (split, blurred background, full screen, square, ...) live in layouts.py,
+# shared with the AI clipper.
+sys.path.insert(0, str(PROJECT_ROOT))
+from layouts import FILTERS as MANUAL_FILTERS
 
 _nvenc_cache: Optional[bool] = None
 
