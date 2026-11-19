@@ -68,14 +68,19 @@ app = FastAPI(title="ClipMore Studio", version="1.0")
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])   # blocks DNS-rebinding
 
-_ALLOWED_ORIGINS = {"http://127.0.0.1:8501", "http://localhost:8501"}
+def _is_local_origin(origin: str) -> bool:
+    return (
+        origin.startswith("http://127.0.0.1:")
+        or origin.startswith("http://localhost:")
+        or origin in ("http://127.0.0.1", "http://localhost")
+    )
 
 
 @app.middleware("http")
 async def block_cross_site_writes(request, call_next):
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("origin")
-        if origin and origin not in _ALLOWED_ORIGINS:
+        if origin and not _is_local_origin(origin):
             return JSONResponse({"detail": "Cross-site request blocked."}, status_code=403)
     return await call_next(request)
 
