@@ -599,11 +599,12 @@ def _pump(stream, tag: str):
 
 def _hls_durations(playlist_url: str) -> list:
     import requests
-    txt = requests.get(playlist_url, timeout=20).text
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    txt = requests.get(playlist_url, headers=headers, timeout=20).text
     if "#EXT-X-STREAM-INF" in txt:   # master playlist -> read the first variant
         variant = next((l.strip() for l in txt.splitlines() if l.strip() and not l.startswith("#")), None)
         if variant:
-            txt = requests.get(urljoin(playlist_url, variant), timeout=20).text
+            txt = requests.get(urljoin(playlist_url, variant), headers=headers, timeout=20).text
     durs = []
     for line in txt.splitlines():
         if line.startswith("#EXTINF:"):
@@ -615,20 +616,25 @@ def _hls_durations(playlist_url: str) -> list:
 
 
 def _start_index(durs: list, backfill: str) -> Optional[int]:
-    """ffmpeg -live_start_index for the requested amount of history (None = live edge)."""
+    """ffmpeg -live_start_index for the requested amount of history (None = live edge).
+    In FFmpeg's HLS demuxer, negative integers count backwards from the live edge (end of playlist).
+    Positive integers refer to absolute segment sequence IDs from stream start (which expire after minutes).
+    """
     if backfill == "now" or not durs:
         return None
     if backfill == "start":
-        return 0
+        return -max(1, len(durs))
     try:
         want = float(backfill)
     except ValueError:
         return None
-    acc, idx = 0.0, len(durs)
-    while idx > 0 and acc < want:
-        idx -= 1
-        acc += durs[idx]
-    return idx
+    acc, count = 0.0, 0
+    for d in reversed(durs):
+        acc += d
+        count += 1
+        if acc >= want:
+            break
+    return -max(1, count)
 
 
 def _capture_youtube(sess: LiveSession):
@@ -652,9 +658,11 @@ def _capture_youtube(sess: LiveSession):
             try:
                 durs = _hls_durations(urls[0])
                 idx = _start_index(durs, sess.backfill)
-                if durs:
-                    sess.note = (f"YouTube is exposing {fmt_hms(sum(durs))} of this stream. "
-                                 f"Older footage is downloading now and will catch up to live in a moment.")
+                if durs and idx is not None:
+                    backfill_s = sum(list(reversed(durs))[:abs(idx)])
+                    sess.note = (f"Backfilling {fmt_hms(backfill_s)} of stream history. "
+                                 f"Downloading backlog to catch up with live...")
+                    state.append_log(f"[LIVE] Backfilling: seeking {abs(idx)} segments (~{fmt_hms(backfill_s)}) back from live edge.")
             except Exception as e:
                 state.append_log(f"[LIVE] Could not read stream history ({e}); starting from the live edge.")
         start_opt = ["-live_start_index", str(idx)] if idx is not None else []
@@ -666,13 +674,15 @@ def _capture_youtube(sess: LiveSession):
             try:
                 durs = _hls_durations(urls[0])
                 idx = _start_index(durs, sess.backfill)
-                if durs:
-                    sess.note = (f"YouTube is exposing {fmt_hms(sum(durs))} of this stream. "
-                                 f"Older footage is downloading now and will catch up to live in a moment.")
+                if durs and idx is not None:
+                    backfill_s = sum(list(reversed(durs))[:abs(idx)])
+                    sess.note = (f"Backfilling {fmt_hms(backfill_s)} of stream history. "
+                                 f"Downloading backlog to catch up with live...")
+                    state.append_log(f"[LIVE] Backfilling: seeking {abs(idx)} segments (~{fmt_hms(backfill_s)}) back from live edge.")
             except Exception as e:
                 state.append_log(f"[LIVE] Could not read stream history ({e}); starting from the live edge.")
-        cmd = base + reconnect + (["-live_start_index", str(idx)] if idx is not None else []) + \
-              ["-i", urls[0], "-c", "copy"] + HLS_OUT
+        start_opt = ["-live_start_index", str(idx)] if idx is not None else []
+        cmd = base + reconnect + start_opt + ["-i", urls[0], "-c", "copy"] + HLS_OUT
 
     state.append_log("[LIVE] Starting recorder...")
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -682,13 +692,23 @@ def _capture_youtube(sess: LiveSession):
 
 
 def _capture_streamlink(sess: LiveSession):
-    sess.note = ("Twitch / Kick only keep a short window of earlier footage, so your recording "
-                 "starts when you connect.")
-    state.append_log(f"[LIVE] Connecting via streamlink: {sess.url}")
-    p1 = subprocess.Popen(
-        [sys.executable, "-m", "streamlink", "--stdout", "--hls-live-restart", sess.url, "best,720p,worst"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW,
-    )
+    low = sess.url.lower()
+    is_vod = "/videos/" in low
+    if is_vod:
+        sess.note = "Twitch VOD loaded. You can scrub and clip the entire recorded broadcast."
+        state.append_log(f"[LIVE] Connecting to Twitch VOD: {sess.url}")
+        p1 = subprocess.Popen(
+            [sys.executable, "-m", "streamlink", "--stdout", sess.url, "best,720p,worst"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW,
+        )
+    else:
+        sess.note = ("Twitch live feeds only keep a 1-2 min sliding buffer. To clip earlier moments, "
+                     "paste the streamer's VOD link from their Videos tab (twitch.tv/videos/...).")
+        state.append_log(f"[LIVE] Connecting via streamlink: {sess.url}")
+        p1 = subprocess.Popen(
+            [sys.executable, "-m", "streamlink", "--stdout", "--hls-live-restart", sess.url, "best,720p,worst"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW,
+        )
     p2 = subprocess.Popen(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-i", "pipe:0", "-c", "copy"] + HLS_OUT,
         stdin=p1.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -775,9 +795,7 @@ def _chat_downloader(sess: "LiveSession"):
 def _run_live_chat(sess: "LiveSession"):
     low = sess.url.lower()
     try:
-        if "twitch.tv" in low:
-            if "/videos/" in low:
-                raise RuntimeError("this is a Twitch recording, not a live channel")
+        if "twitch.tv" in low and "/videos/" not in low:
             _chat_twitch(sess, low.split("?")[0].rstrip("/").split("/")[-1])
         else:
             _chat_downloader(sess)
