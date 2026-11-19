@@ -63,6 +63,22 @@ bootstrap_env()
 
 app = FastAPI(title="ClipMore Studio", version="1.0")
 
+# Local-only hardening: this app reads and writes files on your PC, so a random website
+# open in your browser must not be able to drive it.
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])   # blocks DNS-rebinding
+
+_ALLOWED_ORIGINS = {"http://127.0.0.1:8501", "http://localhost:8501"}
+
+
+@app.middleware("http")
+async def block_cross_site_writes(request, call_next):
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if origin and origin not in _ALLOWED_ORIGINS:
+            return JSONResponse({"detail": "Cross-site request blocked."}, status_code=403)
+    return await call_next(request)
+
 # ---------------------------------------------------------------------------
 # Global Process State
 # ---------------------------------------------------------------------------
@@ -213,6 +229,9 @@ async def start_ai_clipper(req: StartAIRequest):
     url = req.url.strip()
     if not url:
         raise HTTPException(status_code=400, detail="Please enter a valid live stream URL.")
+    if not re.fullmatch(r"https?://\S+", url, re.IGNORECASE):
+        # also stops a value like "--exec ..." from being read as a yt-dlp/streamlink option
+        raise HTTPException(status_code=400, detail="Paste the full stream link, starting with https://")
 
     script_path = AI_DIR / "auto_viral_clipper.py"
     python_exe = sys.executable
@@ -246,7 +265,7 @@ async def start_fallback_clipper(req: StartFallbackRequest):
     if state.mode != "idle":
         raise HTTPException(status_code=400, detail="A clipping process is already running. Please stop it first.")
 
-    target_file = Path(req.file_path.strip().strip('"'))
+    target_file = Path(req.file_path.strip().strip('"')).resolve()
     if not target_file.exists():
         raise HTTPException(status_code=400, detail=f"Target file does not exist: {target_file}")
 
@@ -259,7 +278,7 @@ async def start_fallback_clipper(req: StartFallbackRequest):
     state.start_time = time.time()
     state.append_log(f"[SYSTEM] Launching Fallback DSP Clipper on: {target_file.name}")
 
-    cmd = [python_exe, str(script_path), str(target_file), "--max-clips", str(req.max_clips)]
+    cmd = [python_exe, str(script_path), str(target_file), "--max-clips", str(max(1, min(req.max_clips, 50)))]
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -411,11 +430,13 @@ async def manual_browse():
 
 @app.post("/api/manual/export")
 async def manual_export(req: ManualClipRequest):
-    src = Path(req.file_path.strip().strip('"'))
+    src = Path(req.file_path.strip().strip('"')).resolve()   # absolute path: can never be read as an ffmpeg option
     if not src.is_file():
         raise HTTPException(status_code=400, detail=f"Video file does not exist: {src}")
     if req.layout not in MANUAL_FILTERS:
         raise HTTPException(status_code=400, detail=f"Unknown layout: {req.layout}")
+    if not (math.isfinite(req.start) and math.isfinite(req.end)):
+        raise HTTPException(status_code=400, detail="Start and end must be real numbers.")
     if req.start < 0 or req.end <= req.start:
         raise HTTPException(status_code=400, detail="The end time must be after the start time.")
     if req.end - req.start > MAX_MANUAL_CLIP_SECONDS:
@@ -449,6 +470,7 @@ async def manual_export(req: ManualClipRequest):
 # Live manual clip: record a live link into a seekable buffer, clip any moment
 # ---------------------------------------------------------------------------
 import atexit
+import math
 import shutil
 from urllib.parse import urljoin
 
@@ -508,6 +530,15 @@ class LiveSession:
         self.stop_requested = False
         self.size_mb = 0.0
         self.size_checked = 0.0
+        # Live chat activity (used to show where the comments spike on the timeline)
+        self.chat_lock = threading.Lock()
+        self.chat_buckets = {}      # wall-clock 10 s bucket -> [messages, hype score]
+        self.chat_status = "connecting"   # connecting | on | unavailable
+        self.chat_note = ""
+        self.chat_since = 0.0       # when chat started being counted
+        self.chat_wall0 = None      # wall-clock time that matches position 0 of the recording
+        self.caught_up = False      # recording has reached the live edge, so chat can be placed on it
+        self.rate_prev = None
 
 
 live_session: Optional[LiveSession] = None
@@ -610,7 +641,7 @@ def _capture_youtube(sess: LiveSession):
     base = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning"]
     reconnect = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
 
-    if len(urls) >= 2:   # separate video + audio feeds: no history available
+    if len(urls) >= 2:   # YouTube serves video and audio as separate HLS feeds; keep them in sync from the same start index
         idx = None
         if sess.backfill != "now":
             try:
@@ -664,9 +695,161 @@ def _capture_streamlink(sess: LiveSession):
     threading.Thread(target=_pump, args=(p2.stderr, "ffmpeg"), daemon=True).start()
 
 
+# ---------------------------------------------------------------------------
+# Live chat activity: find the moments where the comments spike
+# ---------------------------------------------------------------------------
+import statistics
+
+CHAT_BUCKET_S = 10        # chat is counted in 10-second buckets
+CHAT_MIN_SCORE = 10       # a bucket needs at least this hype score (about 1 message/s) to count as a spike
+CHAT_HYPE_WORDS = ("CLIP", "LUL", "OMG", "NO WAY", "INSANE", "WHAT", "SHEESH", "CLUTCH",
+                   "POG", "KEKW", "HOLY", "WTF", "YOOO", "LOL")
+
+
+def _chat_alive(sess: "LiveSession") -> bool:
+    return not sess.stop_requested and sess.status in ("connecting", "recording")
+
+
+def _chat_add(sess: "LiveSession", text: str, when: Optional[float] = None):
+    up = (text or "").upper()
+    score = 3 if (any(w in up for w in CHAT_HYPE_WORDS) or "W" in up.split()) else 1
+    bucket = int((when or time.time()) // CHAT_BUCKET_S)
+    with sess.chat_lock:
+        cell = sess.chat_buckets.setdefault(bucket, [0, 0])
+        cell[0] += 1
+        cell[1] += score
+
+
+def _chat_twitch(sess: "LiveSession", channel: str):
+    """Anonymous Twitch chat connection (read only)."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(5.0)
+    try:
+        s.connect(("irc.chat.twitch.tv", 6667))
+        s.sendall(f"PASS SCHMOOPIE\r\nNICK justinfan{int(time.time()) % 100000}\r\nJOIN #{channel}\r\n".encode("utf-8"))
+        sess.chat_since = time.time()
+        sess.chat_status = "on"
+        state.append_log(f"[CHAT] Connected to Twitch chat #{channel}")
+        buf = ""
+        while _chat_alive(sess):
+            try:
+                data = s.recv(4096).decode("utf-8", errors="ignore")
+            except socket.timeout:
+                continue
+            if not data:
+                raise ConnectionError("chat connection closed")
+            buf += data
+            lines = buf.split("\r\n")
+            buf = lines.pop()
+            for line in lines:
+                if line.startswith("PING"):
+                    s.sendall(b"PONG :tmi.twitch.tv\r\n")
+                elif "PRIVMSG" in line:
+                    parts = line.split(f"#{channel} :", 1)
+                    if len(parts) > 1:
+                        _chat_add(sess, parts[1])
+    finally:
+        s.close()
+
+
+def _chat_downloader(sess: "LiveSession"):
+    """YouTube / Kick / other platforms through chat-downloader."""
+    from chat_downloader import ChatDownloader
+    chat = ChatDownloader().get_chat(sess.url)
+    sess.chat_since = time.time()
+    sess.chat_status = "on"
+    state.append_log("[CHAT] Connected to live chat")
+    for message in chat:
+        if not _chat_alive(sess):
+            break
+        ts = message.get("timestamp")   # microseconds since epoch; lets us ignore the backlog sent on connect
+        _chat_add(sess, message.get("message", ""), ts / 1e6 if ts else None)
+
+
+def _run_live_chat(sess: "LiveSession"):
+    low = sess.url.lower()
+    try:
+        if "twitch.tv" in low:
+            if "/videos/" in low:
+                raise RuntimeError("this is a Twitch recording, not a live channel")
+            _chat_twitch(sess, low.split("?")[0].rstrip("/").split("/")[-1])
+        else:
+            _chat_downloader(sess)
+    except ImportError:
+        sess.chat_status = "unavailable"
+        sess.chat_note = "Chat spikes need the chat-downloader package for this platform (pip install chat-downloader)."
+        state.append_log(f"[CHAT] {sess.chat_note}")
+    except Exception as e:
+        if sess.stop_requested:
+            return
+        sess.chat_status = "unavailable"
+        sess.chat_note = "Live chat isn't available for this stream."
+        state.append_log(f"[CHAT] Chat unavailable: {e}")
+
+
+def build_chat_payload(sess: "LiveSession", total: float, sens: float) -> dict:
+    """Chat activity placed on the recording's timeline, plus the areas where it spikes."""
+    out = {"status": sess.chat_status, "note": sess.chat_note, "bucket": CHAT_BUCKET_S, "buckets": [], "spikes": []}
+    if not sess.chat_since or (sess.chat_status != "on" and not sess.chat_buckets):
+        return out
+    if not sess.caught_up:
+        out["status"] = "waiting"   # old footage is still downloading, so chat can't be matched to it yet
+        return out
+
+    now = time.time()
+    if total > 0:
+        est = now - total
+        if sess.chat_wall0 is None or est < sess.chat_wall0:   # lowest value = most accurate (segments arrive in 4 s steps)
+            sess.chat_wall0 = est
+    if sess.chat_wall0 is None:
+        out["status"] = "waiting"
+        return out
+
+    with sess.chat_lock:
+        cells = {b: tuple(c) for b, c in sess.chat_buckets.items()}
+    lo = int(math.ceil(sess.chat_since / CHAT_BUCKET_S))
+    hi = int(now // CHAT_BUCKET_S) - 1          # the bucket still filling up is left out
+    rows = []
+    for b in range(max(lo, hi - 2160), hi + 1):   # up to the last ~6 hours
+        start = b * CHAT_BUCKET_S - sess.chat_wall0
+        if start + CHAT_BUCKET_S <= 0 or start >= total:
+            continue
+        n, w = cells.get(b, (0, 0))
+        rows.append((max(0.0, start), n, w))
+
+    out["buckets"] = [[round(s, 1), w] for s, n, w in rows]
+    scores = [w for _, _, w in rows]
+    if len(scores) < 6:
+        return out
+
+    mean = statistics.fmean(scores)
+    threshold = max(mean + min(max(sens, 1.0), 4.0) * statistics.pstdev(scores), CHAT_MIN_SCORE)
+    cur = None
+    for s, n, w in rows:
+        if w < threshold:
+            continue
+        if cur and s <= cur["end"] + 1.0:
+            cur["end"] = s + CHAT_BUCKET_S
+            cur["n"], cur["w"] = max(cur["n"], n), max(cur["w"], w)
+        else:
+            if cur:
+                out["spikes"].append(cur)
+            cur = {"start": s, "end": s + CHAT_BUCKET_S, "n": n, "w": w}
+    if cur:
+        out["spikes"].append(cur)
+    out["spikes"] = [
+        {"start": round(c["start"], 1), "end": round(min(c["end"], total), 1),
+         "rate": round(c["n"] / CHAT_BUCKET_S, 1), "x": round(c["w"] / max(mean, 1.0), 1)}
+        for c in out["spikes"]
+    ]
+    return out
+
+
 def _run_live_capture(sess: LiveSession):
     try:
         sess.dir.mkdir(parents=True, exist_ok=True)
+        threading.Thread(target=_run_live_chat, args=(sess,), daemon=True).start()
         if sess.platform == "youtube":
             _capture_youtube(sess)
         else:
@@ -716,6 +899,72 @@ def _shutdown_live():
 atexit.register(_shutdown_live)
 
 
+def _bind_children_to_app_lifetime() -> bool:
+    """Windows only: puts this app in a job object that kills everything it started (ffmpeg,
+    streamlink, yt-dlp, the AI clipper) the moment the app dies, even if its window is closed
+    or it is force-killed. atexit alone can't cover those cases."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+        class BASIC_LIMITS(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
+                        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class EXTENDED_LIMITS(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", BASIC_LIMITS), ("IoInfo", IO_COUNTERS),
+                        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return False
+        info = EXTENDED_LIMITS()
+        info.BasicLimitInformation.LimitFlags = 0x2000   # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            return False
+        if not k32.AssignProcessToJobObject(job, k32.GetCurrentProcess()):
+            return False
+        globals()["_APP_JOB"] = job   # keep the handle open for the life of the app
+        return True
+    except Exception:
+        return False
+
+
+def _prune_old_recordings(max_age_hours: int = 24):
+    """Recordings from earlier runs can't be reopened (the app only tracks the current session),
+    so delete the old ones instead of letting multi-GB folders pile up."""
+    cutoff = time.time() - max_age_hours * 3600
+    try:
+        for d in LIVE_DIR.iterdir():
+            if d.is_dir() and re.fullmatch(r"\d{8}_\d{6}", d.name) and d.stat().st_mtime < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+                state.append_log(f"[LIVE] Removed old recording {d.name}")
+    except Exception:
+        pass
+
+
+_bind_children_to_app_lifetime()
+_prune_old_recordings()
+
+
 @app.post("/api/live/connect")
 def live_connect(req: LiveConnectRequest):
     global live_session
@@ -738,7 +987,7 @@ def live_connect(req: LiveConnectRequest):
 
 
 @app.get("/api/live/status")
-def live_status():
+def live_status(chat_sens: float = Query(2.0)):
     s = live_session
     if not s:
         return {"active": False}
@@ -747,6 +996,19 @@ def live_status():
     if s.status == "connecting" and total > 0:
         s.status = "recording"
         state.append_log("[LIVE] Recording. You can scrub the timeline and clip now.")
+
+    # Has the recording reached the live edge? YouTube replays old footage much faster than real time first.
+    if not s.caught_up and total > 0:
+        now_t = time.time()
+        if s.backfill == "now" or s.platform != "youtube":
+            s.caught_up = True
+        elif s.rate_prev is None:
+            s.rate_prev = (now_t, total)
+        elif now_t - s.rate_prev[0] >= 6:
+            if (total - s.rate_prev[1]) / (now_t - s.rate_prev[0]) <= 1.6:
+                s.caught_up = True
+            else:
+                s.rate_prev = (now_t, total)
 
     if s.status in ("connecting", "recording"):
         try:
@@ -778,6 +1040,7 @@ def live_status():
         "segments": len(segs),
         "size_mb": s.size_mb,
         "playlist": f"/api/live/{s.id}/index.m3u8",
+        "chat": build_chat_payload(s, total, chat_sens),
     }
 
 
@@ -821,6 +1084,8 @@ async def live_clip(req: LiveClipRequest):
     if not segs:
         raise HTTPException(status_code=400, detail="Nothing has been recorded yet.")
 
+    if not (math.isfinite(req.start) and math.isfinite(req.end)):
+        raise HTTPException(status_code=400, detail="Start and end must be real numbers.")
     start = max(0.0, req.start)
     end = min(req.end, total)          # can't clip footage that hasn't been recorded yet
     if end - start < 0.2:
@@ -1007,6 +1272,26 @@ async def stream_video(folder: str, filename: str):
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="Video file not found")
     return FileResponse(path=str(target), media_type="video/mp4", filename=filename)
+
+
+@app.delete("/api/clips/{folder}/{filename}")
+async def delete_clip(folder: str, filename: str):
+    bases = {"exports": EXPORTS_DIR, "fallback_exports": FALLBACK_EXPORTS_DIR, "manual_exports": MANUAL_EXPORTS_DIR}
+    if folder not in bases:
+        raise HTTPException(status_code=400, detail="Invalid folder")
+    target = bases[folder] / Path(filename).name   # .name blocks path traversal
+    if target.suffix.lower() != ".mp4":
+        raise HTTPException(status_code=400, detail="Only .mp4 clips can be deleted here.")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Clip not found (already deleted?)")
+    try:
+        target.unlink()
+    except PermissionError:
+        raise HTTPException(status_code=409, detail="The clip is in use by another program. Close it and try again.")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not delete: {e}")
+    state.append_log(f"[CLIPS] Deleted {folder}/{target.name}")
+    return {"status": "deleted", "folder": folder, "filename": target.name}
 
 
 @app.post("/api/open-folder")

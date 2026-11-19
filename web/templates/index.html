@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ClipMore Studio - Autonomous Stream Clipper</title>
   <!-- Tailwind CSS CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <!-- Lucide Icons CDN -->
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://unpkg.com/lucide@1.68.0/dist/umd/lucide.min.js"></script>
   <!-- hls.js: plays the growing live recording in the Manual Clip player -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
   <style>
@@ -250,6 +250,8 @@
           </div>
         </div>
 
+        <p id="live-start-hint" class="hidden text-[11px] text-amber-400"></p>
+
         <!-- Live status bar -->
         <div id="live-bar" class="hidden rounded-xl bg-gray-950 border border-gray-800 px-4 py-3 space-y-2">
           <div class="flex items-center justify-between gap-3">
@@ -280,11 +282,56 @@
             <span class="font-mono" id="mt-total">0:00.0</span>
           </div>
           <div id="mt-track" class="relative h-12 rounded-lg bg-gray-950 border border-gray-800 select-none cursor-pointer">
+            <canvas id="mt-chat-canvas" class="absolute inset-0 w-full h-full rounded-lg pointer-events-none"></canvas>
+            <div id="mt-spikes" class="absolute inset-0 overflow-hidden rounded-lg pointer-events-none"></div>
             <div id="mt-selection" class="absolute top-0 bottom-0 bg-violet-500/30 border-y border-violet-400/60 pointer-events-none"></div>
             <div id="mt-playhead" class="absolute top-0 bottom-0 w-0.5 bg-white/80 pointer-events-none"></div>
             <div id="mt-handle-start" data-handle="start" class="absolute w-3.5 rounded bg-emerald-400 cursor-ew-resize shadow-lg" style="top:-4px;bottom:-4px;transform:translateX(-50%);touch-action:none"></div>
             <div id="mt-handle-end" data-handle="end" class="absolute w-3.5 rounded bg-rose-400 cursor-ew-resize shadow-lg" style="top:-4px;bottom:-4px;transform:translateX(-50%);touch-action:none"></div>
           </div>
+
+          <!-- Chat activity legend (live links only): orange areas = comments spike -->
+          <div id="chat-legend" class="hidden space-y-1.5">
+            <div class="flex items-center justify-between gap-3 text-[11px]">
+              <span class="flex items-center gap-2 min-w-0">
+                <span class="inline-block w-3 h-3 rounded-sm bg-orange-400/40 border border-orange-400/80 flex-shrink-0"></span>
+                <span id="chat-status" class="text-gray-400 truncate">Chat spikes</span>
+              </span>
+              <label class="flex items-center gap-1.5 text-gray-400 flex-shrink-0">
+                <span>Sensitivity</span>
+                <select id="chat-sens" onchange="onChatSensChange()" class="bg-gray-950 border border-gray-800 rounded-lg px-2 py-1 text-[11px] text-gray-200 outline-none focus:border-orange-400">
+                  <option value="3.0">Low</option>
+                  <option value="2.0" selected>Medium</option>
+                  <option value="1.4">High</option>
+                </select>
+              </label>
+            </div>
+            <div id="chat-spike-list" class="flex flex-wrap gap-1.5"></div>
+          </div>
+        </div>
+
+        <!-- Quick tools -->
+        <div class="space-y-2">
+          <div class="flex flex-wrap items-center gap-1.5 text-[11px]">
+            <span class="text-gray-400 mr-0.5">Length:</span>
+            <button onclick="setLength(15)" class="px-2 py-1 rounded-lg bg-gray-900 hover:bg-gray-800 text-gray-300 border border-gray-800 font-mono">15s</button>
+            <button onclick="setLength(30)" class="px-2 py-1 rounded-lg bg-gray-900 hover:bg-gray-800 text-gray-300 border border-gray-800 font-mono">30s</button>
+            <button onclick="setLength(45)" class="px-2 py-1 rounded-lg bg-gray-900 hover:bg-gray-800 text-gray-300 border border-gray-800 font-mono">45s</button>
+            <button onclick="setLength(60)" class="px-2 py-1 rounded-lg bg-gray-900 hover:bg-gray-800 text-gray-300 border border-gray-800 font-mono">60s</button>
+            <button onclick="clipLastSeconds(30)" class="px-2 py-1 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30" title="Select the most recent 30 seconds">Last 30s</button>
+            <span class="w-px h-4 bg-gray-800 mx-1"></span>
+            <button onclick="jumpSpike(-1)" class="px-2 py-1 rounded-lg bg-orange-500/10 hover:bg-orange-500/20 text-orange-300 border border-orange-400/30" title="Previous chat spike ( [ )">&#9664; Spike</button>
+            <button onclick="jumpSpike(1)" class="px-2 py-1 rounded-lg bg-orange-500/10 hover:bg-orange-500/20 text-orange-300 border border-orange-400/30" title="Next chat spike ( ] )">Spike &#9654;</button>
+            <span class="w-px h-4 bg-gray-800 mx-1"></span>
+            <label class="flex items-center gap-1 text-gray-400">Speed
+              <select id="manual-speed" onchange="setSpeed(this.value)" class="bg-gray-950 border border-gray-800 rounded-lg px-1.5 py-1 text-[11px] text-gray-200 outline-none">
+                <option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option>
+              </select>
+            </label>
+            <label class="flex items-center gap-1 text-gray-400 cursor-pointer"><input type="checkbox" id="loop-preview" class="accent-violet-500">Loop preview</label>
+            <label class="flex items-center gap-1 text-gray-400 cursor-pointer" title="Beep and show a message when a new chat spike appears on a live stream"><input type="checkbox" id="chat-notify" class="accent-orange-500">Alert on new spike</label>
+          </div>
+          <p class="text-[10px] text-gray-500">Shortcuts: <span class="font-mono">Space</span> play/pause &middot; <span class="font-mono">&larr; &rarr;</span> 5s (<span class="font-mono">Shift</span> 1s) &middot; <span class="font-mono">I</span>/<span class="font-mono">O</span> mark start/end &middot; <span class="font-mono">[</span> <span class="font-mono">]</span> prev/next spike &middot; <span class="font-mono">P</span> preview &middot; <span class="font-mono">E</span> export</p>
         </div>
 
         <!-- Exact times -->
@@ -613,6 +660,10 @@
       } catch (e) {}
     }
 
+    function escHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
     async function loadClips() {
       try {
         const res = await fetch('/api/clips');
@@ -635,38 +686,71 @@
 
         container.innerHTML = '';
         data.clips.forEach(clip => {
+          const encName = encodeURIComponent(clip.filename).replace(/'/g, '%27');
+          const safeUrl = `/api/video/${encodeURIComponent(clip.folder)}/${encName}`;
           const item = document.createElement('div');
           item.className = 'p-3.5 rounded-xl bg-gray-950/80 border border-gray-800 hover:border-gray-700 transition flex items-center justify-between space-x-3';
           item.innerHTML = `
             <div class="flex items-center space-x-3 min-w-0">
-              <div class="w-10 h-10 rounded-lg bg-gray-900 border border-gray-800 flex items-center justify-center flex-shrink-0 cursor-pointer hover:bg-gray-800" onclick="playClip('${clip.url}')">
+              <div class="w-10 h-10 rounded-lg bg-gray-900 border border-gray-800 flex items-center justify-center flex-shrink-0 cursor-pointer hover:bg-gray-800" onclick="playClip('${safeUrl}')">
                 <i data-lucide="play" class="w-4 h-4 text-cyan-400 fill-cyan-400"></i>
               </div>
               <div class="min-w-0">
                 <div class="flex items-center space-x-2">
-                  <h4 class="text-xs font-bold text-white truncate">${clip.title}</h4>
+                  <h4 class="text-xs font-bold text-white truncate">${escHtml(clip.title)}</h4>
                   <span class="px-1.5 py-0.2 rounded text-[10px] font-bold ${
                     clip.type === 'AI Autonomous' ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20'
                     : clip.type === 'Manual' ? 'bg-violet-500/10 text-violet-400 border border-violet-500/20'
                     : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
                   }">${clip.type === 'Manual' ? '✂ Manual' : '🔥 ' + clip.score}</span>
                 </div>
-                <p class="text-[10px] text-gray-500 truncate mt-0.5">${clip.filename} • ${clip.size_mb} MB</p>
+                <p class="text-[10px] text-gray-500 truncate mt-0.5">${escHtml(clip.filename)} • ${clip.size_mb} MB</p>
               </div>
             </div>
             <div class="flex items-center space-x-1 flex-shrink-0">
-              <button onclick="playClip('${clip.url}')" class="p-2 rounded-lg hover:bg-gray-800 text-gray-300 transition" title="Preview Clip">
+              <button onclick="playClip('${safeUrl}')" class="p-2 rounded-lg hover:bg-gray-800 text-gray-300 transition" title="Preview Clip">
                 <i data-lucide="eye" class="w-4 h-4"></i>
               </button>
-              <a href="${clip.url}" download="${clip.filename}" class="p-2 rounded-lg hover:bg-gray-800 text-gray-300 transition" title="Download MP4">
+              <a href="${safeUrl}" download="${escHtml(clip.filename)}" class="p-2 rounded-lg hover:bg-gray-800 text-gray-300 transition" title="Download MP4">
                 <i data-lucide="download" class="w-4 h-4"></i>
               </a>
+              <button onclick="deleteClip('${clip.folder}', decodeURIComponent('${encName}'))" class="p-2 rounded-lg hover:bg-rose-500/10 text-gray-400 hover:text-rose-400 transition" title="Delete clip">
+                <i data-lucide="trash-2" class="w-4 h-4"></i>
+              </button>
             </div>
           `;
           container.appendChild(item);
         });
         lucide.createIcons();
       } catch (e) {}
+    }
+
+    async function deleteClip(folder, filename) {
+      if (!confirm(`Delete "${filename}"?\n\nThis permanently removes the file and can't be undone.`)) return;
+
+      // Windows won't delete a file that's open, so release the preview player first
+      const player = document.getElementById('main-video-player');
+      try {
+        if (player.getAttribute('src') && decodeURIComponent(player.src).endsWith('/' + filename)) {
+          closePreview();
+          player.removeAttribute('src');
+          player.load();
+        }
+      } catch (e) {}
+
+      try {
+        const res = await fetch(`/api/clips/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok && res.status !== 404) {
+          showToast(data.detail || 'Could not delete the clip.', 'error');
+          return;
+        }
+        showToast(res.status === 404 ? 'Clip was already gone.' : 'Clip deleted.', 'info');
+      } catch (e) {
+        showToast('Error reaching the backend API', 'error');
+        return;
+      }
+      loadClips();
     }
 
     function playClip(url) {
@@ -691,6 +775,7 @@
     const MIN_CLIP = 0.2;           // seconds
     const MAX_CLIP = 600;           // matches backend limit
     const $m = (id) => document.getElementById(id);
+    const chat = { buckets: [], spikes: [], status: 'off', note: '', bucket: 10, sig: '' };   // live chat activity for the timeline
 
     function fmtTime(t) {
       t = Math.round(Math.max(0, t || 0) * 10) / 10;
@@ -747,6 +832,7 @@
       const lenEl = $m('manual-duration');
       lenEl.textContent = len.toFixed(1) + 's';
       lenEl.className = 'text-2xl font-bold font-mono ' + (len > MAX_CLIP ? 'text-rose-400' : 'text-white');
+      renderChat();
     }
 
     function updatePlayhead() {
@@ -836,8 +922,12 @@
       v.addEventListener('timeupdate', () => {
         updatePlayhead();
         if (manual.previewing && v.currentTime >= manual.end) {
-          v.pause();
-          manual.previewing = false;
+          if ($m('loop-preview').checked) {
+            v.currentTime = manual.start;   // loop the selection
+          } else {
+            v.pause();
+            manual.previewing = false;
+          }
         }
       });
       v.addEventListener('pause', () => { if (v.currentTime < manual.end) manual.previewing = false; });
@@ -879,8 +969,17 @@
         if (activeTab !== 'manual') return;
         const tag = (e.target.tagName || '').toLowerCase();
         if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-        if (e.key === 'i' || e.key === 'I') setFromPlayhead('start');
-        else if (e.key === 'o' || e.key === 'O') setFromPlayhead('end');
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        const k = e.key;
+        if (k === 'i' || k === 'I') setFromPlayhead('start');
+        else if (k === 'o' || k === 'O') setFromPlayhead('end');
+        else if (k === ' ' && tag !== 'button') { e.preventDefault(); v.paused ? v.play().catch(() => {}) : v.pause(); }
+        else if (k === 'ArrowLeft') { e.preventDefault(); seekManual(v.currentTime - (e.shiftKey ? 1 : 5)); }
+        else if (k === 'ArrowRight') { e.preventDefault(); seekManual(v.currentTime + (e.shiftKey ? 1 : 5)); }
+        else if (k === '[') jumpSpike(-1);
+        else if (k === ']') jumpSpike(1);
+        else if (k === 'p' || k === 'P') previewSelection();
+        else if (k === 'e' || k === 'E') exportManualClip();
       });
 
       renderManual();
@@ -897,6 +996,15 @@
       const url = isStreamUrl($m('manual-file-input').value);
       $m('live-options').classList.toggle('hidden', !url || live.active);
       $m('manual-load-btn').textContent = url ? 'Connect' : 'Load';
+
+      // Twitch / Kick don't let anyone download the part of the stream that already happened
+      const raw = $m('manual-file-input').value.toLowerCase();
+      const noHistory = url && !live.active && !/youtube\.com|youtu\.be/.test(raw) && !/\/videos\//.test(raw);
+      const hint = $m('live-start-hint');
+      hint.classList.toggle('hidden', !noHistory);
+      hint.textContent = noHistory
+        ? 'Twitch and Kick only share the last few seconds of a live stream, so recording starts when you connect. To clip from the beginning, paste the stream\'s VOD link (twitch.tv/videos/…) instead, if the streamer saves past broadcasts.'
+        : '';
     }
 
     function setLiveUI(show) { $m('live-bar').classList.toggle('hidden', !show); onManualInputChange(); }
@@ -918,6 +1026,7 @@
       const v = $m('manual-video');
       v.removeAttribute('src');
       v.load();
+      resetChat();
       setLiveUI(false);
     }
 
@@ -954,6 +1063,7 @@
       live.status = 'connecting';
       setLiveUI(true);
       renderLiveBar({ status: 'connecting' });
+      resetChat();
       renderManual();
       try {
         const res = await fetch('/api/live/connect', {
@@ -974,7 +1084,7 @@
       if (manual.mode !== 'live') { stopLivePoll(); return; }
       let s;
       try {
-        const res = await fetch('/api/live/status');
+        const res = await fetch('/api/live/status?chat_sens=' + encodeURIComponent($m('chat-sens').value));
         s = await res.json();
       } catch (e) { return; }   // transient: try again on the next tick
 
@@ -996,6 +1106,7 @@
         if (!live.attached && s.playlist) attachLive(s.playlist);
       }
       renderLiveBar(s);
+      if (s.chat) applyChat(s.chat);
       if (['ended', 'stopped', 'error'].includes(s.status)) stopLivePoll();
     }
 
@@ -1078,6 +1189,177 @@
         showToast('Disconnected. The recording is kept, so you can keep clipping it.', 'info');
       }
     }
+
+    // ------------------------------------------------------------------
+    // Chat spikes: show the areas of the timeline where the comments jump
+    // ------------------------------------------------------------------
+    function resetChat() {
+      chat.buckets = []; chat.spikes = []; chat.status = 'off'; chat.note = ''; chat.sig = ''; chat.lastStart = null;
+      $m('chat-legend').classList.add('hidden');
+      $m('chat-spike-list').innerHTML = '';
+      renderChat();
+    }
+
+    function onChatSensChange() {
+      if (manual.mode === 'live') pollLive();
+    }
+
+    function applyChat(c) {
+      chat.status = c.status || 'off';
+      chat.note = c.note || '';
+      chat.bucket = c.bucket || 10;
+      chat.buckets = c.buckets || [];
+      chat.spikes = c.spikes || [];
+
+      // Alert when a new spike shows up (the first batch of existing spikes is not announced)
+      if (chat.status === 'on') {
+        const newest = chat.spikes.reduce((m, sp) => Math.max(m, sp.start), -1);
+        if (chat.lastStart === null) chat.lastStart = newest;
+        else if (newest > chat.lastStart) {
+          chat.lastStart = newest;
+          if ($m('chat-notify').checked) {
+            showToast('🔥 Chat spike at ' + fmtTime(newest).replace(/\.\d$/, ''), 'info');
+            beep();
+          }
+        }
+      }
+
+      $m('chat-legend').classList.remove('hidden');
+      const n = chat.spikes.length;
+      const text = {
+        connecting:  'Connecting to chat…',
+        waiting:     'Waiting for the recording to catch up to live before placing chat…',
+        on:          n ? `${n} chat spike${n > 1 ? 's' : ''} · orange areas are where comments jump` : 'Chat connected · no spikes yet',
+        unavailable: chat.note || 'Live chat is not available for this stream'
+      }[chat.status] || '';
+      $m('chat-status').textContent = text;
+
+      // Only rebuild the clickable list when it changed, so clicks are not lost mid-press
+      const sig = JSON.stringify(chat.spikes);
+      if (sig !== chat.sig) {
+        chat.sig = sig;
+        const short = (t) => fmtTime(t).replace(/\.\d$/, '');
+        $m('chat-spike-list').innerHTML = chat.spikes.map((sp, i) => [sp, i]).slice(-12).map(([sp, i]) =>
+          `<button onclick="selectSpike(${i})" class="px-2 py-1 rounded-lg bg-orange-500/10 hover:bg-orange-500/20 border border-orange-400/30 text-[11px] text-orange-300 font-mono transition" title="Select this area for the clip">🔥 ${short(sp.start)}–${short(sp.end)} · ${sp.rate}/s</button>`
+        ).join('');
+      }
+      renderChat();
+    }
+
+    // Draws the chat-activity bars and the orange spike areas on the timeline
+    function renderChat() {
+      const track = $m('mt-track'), canvas = $m('mt-chat-canvas'), box = $m('mt-spikes');
+      const W = track.clientWidth, H = track.clientHeight;
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+        canvas.width = Math.round(W * dpr);
+        canvas.height = Math.round(H * dpr);
+      }
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+      box.innerHTML = '';
+
+      const d = manual.duration;
+      if (manual.mode !== 'live' || d <= 0 || !chat.buckets.length) return;
+
+      let maxW = 10;
+      for (const b of chat.buckets) if (b[1] > maxW) maxW = b[1];
+      ctx.fillStyle = 'rgba(34, 211, 238, 0.45)';
+      for (const [s, w] of chat.buckets) {
+        if (w <= 0) continue;
+        const x = (s / d) * W;
+        const bw = Math.max(1, (chat.bucket / d) * W - 0.5);
+        const h = Math.max(1.5, (w / maxW) * (H - 4));
+        ctx.fillRect(x, H - h, bw, h);
+      }
+
+      for (const sp of chat.spikes) {
+        const band = document.createElement('div');
+        band.className = 'absolute top-0 bottom-0 bg-orange-400/25 border-x border-orange-400/70';
+        band.style.left = (sp.start / d) * 100 + '%';
+        band.style.width = Math.max(0.3, ((sp.end - sp.start) / d) * 100) + '%';
+        box.appendChild(band);
+      }
+    }
+
+    // Click a spike: select it, with a lead-in because chat reacts a few seconds after the moment
+    function selectSpike(i) {
+      const sp = chat.spikes[i];
+      if (!sp || manual.duration <= 0) return;
+      const end = Math.min(manual.duration, sp.end + 3);
+      const start = Math.max(0, Math.max(sp.start - 25, end - MAX_CLIP));
+      applySelection(start, end, 'end');
+      seekManual(manual.start);
+    }
+
+    window.addEventListener('resize', renderChat);
+
+    // ------------------------------------------------------------------
+    // Quick tools
+    // ------------------------------------------------------------------
+    function setLength(n) {
+      const d = manual.duration;
+      if (d <= 0) { showToast('Load a video or stream first.', 'error'); return; }
+      n = Math.min(n, d);
+      const start = Math.min(manual.start, d - n);
+      applySelection(Math.max(0, start), Math.max(0, start) + n, 'end');
+      seekManual(manual.start);
+    }
+
+    function clipLastSeconds(n) {
+      const d = manual.duration;
+      if (d <= 0) { showToast('Load a video or stream first.', 'error'); return; }
+      applySelection(Math.max(0, d - n), d, 'end');
+      seekManual(manual.start);
+    }
+
+    // Jump to the previous / next chat spike and select it
+    function jumpSpike(dir) {
+      if (!chat.spikes.length) { showToast('No chat spikes yet.', 'info'); return; }
+      const t = $m('manual-video').currentTime;
+      let idx = -1;
+      if (dir > 0) idx = chat.spikes.findIndex(sp => sp.start - 25 > t + 1);
+      else for (let i = chat.spikes.length - 1; i >= 0; i--) if (chat.spikes[i].start - 25 < t - 1) { idx = i; break; }
+      if (idx < 0) { showToast(dir > 0 ? 'No later spike.' : 'No earlier spike.', 'info'); return; }
+      selectSpike(idx);
+    }
+
+    function setSpeed(v) {
+      $m('manual-video').playbackRate = parseFloat(v) || 1;
+    }
+
+    function beep() {
+      try {
+        const a = new (window.AudioContext || window.webkitAudioContext)();
+        const o = a.createOscillator(), g = a.createGain();
+        o.connect(g); g.connect(a.destination);
+        o.frequency.value = 880; g.gain.value = 0.05;
+        o.start(); o.stop(a.currentTime + 0.15);
+      } catch (e) {}
+    }
+
+    // Remember your choices between sessions
+    (function initPrefs() {
+      const KEY = 'clipmore.manual.prefs';
+      const ids = ['manual-layout', 'chat-sens', 'manual-speed', 'live-backfill'];
+      const checks = ['loop-preview', 'chat-notify'];
+      const save = () => {
+        try {
+          const p = {};
+          ids.forEach(id => p[id] = $m(id).value);
+          checks.forEach(id => p[id] = $m(id).checked);
+          localStorage.setItem(KEY, JSON.stringify(p));
+        } catch (e) {}
+      };
+      try {
+        const p = JSON.parse(localStorage.getItem(KEY) || '{}');
+        ids.forEach(id => { const el = $m(id); if (p[id] !== undefined && [...el.options].some(o => o.value === p[id])) el.value = p[id]; });
+        checks.forEach(id => { if (typeof p[id] === 'boolean') $m(id).checked = p[id]; });
+        setSpeed($m('manual-speed').value);
+      } catch (e) {}
+      [...ids, ...checks].forEach(id => $m(id).addEventListener('change', save));
+    })();
 
     // After a page refresh, re-attach to a recording that is still running
     (async function adoptLive() {
