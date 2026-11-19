@@ -775,7 +775,7 @@
     const MIN_CLIP = 0.2;           // seconds
     const MAX_CLIP = 600;           // matches backend limit
     const $m = (id) => document.getElementById(id);
-    const chat = { buckets: [], spikes: [], status: 'off', note: '', bucket: 10, sig: '' };   // live chat activity for the timeline
+    const chat = { buckets: [], spikes: [], status: 'off', note: '', bucket: 10, sig: '', activeSpike: null, prevActiveSpike: null };   // live chat activity for the timeline
 
     function fmtTime(t) {
       t = Math.round(Math.max(0, t || 0) * 10) / 10;
@@ -811,6 +811,7 @@
       manual.start = start;
       manual.end = end;
       if (changed === 'end') manual.endAtLive = manual.mode === 'live' && end >= max - 0.5;
+      else if (changed === 'spike' || changed === 'both' || changed === 'start') manual.endAtLive = false;
       renderManual();
     }
 
@@ -848,11 +849,13 @@
 
     function setFromPlayhead(which) {
       const t = $m('manual-video').currentTime;
+      manual.endAtLive = false;
       if (which === 'start') applySelection(t, Math.max(manual.end, t + MIN_CLIP), 'start');
       else applySelection(manual.start, t, 'end');
     }
 
     function nudgeSel(which, delta) {
+      manual.endAtLive = false;
       if (which === 'start') { applySelection(manual.start + delta, manual.end, 'start'); seekManual(manual.start); }
       else { applySelection(manual.start, manual.end + delta, 'end'); seekManual(manual.end); }
     }
@@ -860,6 +863,7 @@
     function onManualTimeTyped(which, value) {
       const t = parseTime(value);
       if (isNaN(t)) { showToast('Use a time like 83.5, 1:23.5 or 1:02:03', 'error'); renderManual(); return; }
+      manual.endAtLive = false;
       if (which === 'start') applySelection(t, Math.max(manual.end, t + MIN_CLIP), 'start');
       else applySelection(manual.start, t, 'end');
       seekManual(which === 'start' ? manual.start : manual.end);
@@ -867,10 +871,22 @@
 
     function previewSelection() {
       const v = $m('manual-video');
-      if (!v.getAttribute('src') || manual.duration <= 0) { showToast('Load a video first.', 'error'); return; }
-      manual.previewing = true;
+      const hasSrc = (manual.mode === 'live' && live.attached) || (v.getAttribute('src') || v.src);
+      if (!hasSrc || manual.duration <= 0) { showToast('Load a video or live stream first.', 'error'); return; }
+      manual.previewing = false;
       v.currentTime = manual.start;
-      v.play();
+      updatePlayhead();
+      const startPlayback = () => {
+        manual.previewing = true;
+        const p = v.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      };
+      if (Math.abs(v.currentTime - manual.start) < 0.25) {
+        startPlayback();
+      } else {
+        v.addEventListener('seeked', startPlayback, { once: true });
+        setTimeout(startPlayback, 250);
+      }
     }
 
     async function browseManualFile() {
@@ -921,7 +937,7 @@
 
       v.addEventListener('timeupdate', () => {
         updatePlayhead();
-        if (manual.previewing && v.currentTime >= manual.end) {
+        if (manual.previewing && !v.seeking && v.currentTime >= manual.end) {
           if ($m('loop-preview').checked) {
             v.currentTime = manual.start;   // loop the selection
           } else {
@@ -947,13 +963,24 @@
           dragging = handle.dataset.handle;
           handle.setPointerCapture(e.pointerId);
           manual.previewing = false;
+          manual.endAtLive = false;
         } else {
-          seekManual(timeFromPointer(e));
+          const t = timeFromPointer(e);
+          // Check if user clicked on or near (+/- 3s) any chat spike
+          const spikeIdx = chat.spikes.findIndex(sp => t >= sp.start - 3 && t <= sp.end + 3);
+          if (spikeIdx !== -1) {
+            selectSpike(spikeIdx);
+          } else {
+            chat.activeSpike = null;
+            manual.previewing = false;
+            seekManual(t);
+          }
         }
       });
 
       track.addEventListener('pointermove', (e) => {
         if (!dragging) return;
+        manual.endAtLive = false;
         const t = timeFromPointer(e);
         if (dragging === 'start') applySelection(t, manual.end, 'start');
         else applySelection(manual.start, t, 'end');
@@ -1234,14 +1261,19 @@
       }[chat.status] || '';
       $m('chat-status').textContent = text;
 
-      // Only rebuild the clickable list when it changed, so clicks are not lost mid-press
+      // Only rebuild the clickable list when it changed or active spike changed
       const sig = JSON.stringify(chat.spikes);
-      if (sig !== chat.sig) {
+      if (sig !== chat.sig || chat.activeSpike !== chat.prevActiveSpike) {
         chat.sig = sig;
+        chat.prevActiveSpike = chat.activeSpike;
         const short = (t) => fmtTime(t).replace(/\.\d$/, '');
-        $m('chat-spike-list').innerHTML = chat.spikes.map((sp, i) => [sp, i]).slice(-12).map(([sp, i]) =>
-          `<button onclick="selectSpike(${i})" class="px-2 py-1 rounded-lg bg-orange-500/10 hover:bg-orange-500/20 border border-orange-400/30 text-[11px] text-orange-300 font-mono transition" title="Select this area for the clip">🔥 ${short(sp.start)}–${short(sp.end)} · ${sp.rate}/s</button>`
-        ).join('');
+        $m('chat-spike-list').innerHTML = chat.spikes.map((sp, i) => {
+          const isActive = chat.activeSpike === i;
+          const cls = isActive
+            ? 'px-2 py-1 rounded-lg bg-orange-500/35 border border-orange-400 text-[11px] text-white font-mono font-bold shadow-md ring-1 ring-orange-400 transition cursor-pointer'
+            : 'px-2 py-1 rounded-lg bg-orange-500/10 hover:bg-orange-500/25 border border-orange-400/30 text-[11px] text-orange-300 font-mono transition cursor-pointer';
+          return `<button type="button" onclick="selectSpike(${i})" class="${cls}" title="Select and preview this spike">🔥 ${short(sp.start)}–${short(sp.end)} · ${sp.rate}/s</button>`;
+        }).join('');
       }
       renderChat();
     }
@@ -1274,23 +1306,40 @@
         ctx.fillRect(x, H - h, bw, h);
       }
 
-      for (const sp of chat.spikes) {
+      for (let i = 0; i < chat.spikes.length; i++) {
+        const sp = chat.spikes[i];
+        const isActive = chat.activeSpike === i;
         const band = document.createElement('div');
-        band.className = 'absolute top-0 bottom-0 bg-orange-400/25 border-x border-orange-400/70';
+        band.className = 'absolute top-0 bottom-0 ' +
+          (isActive ? 'bg-orange-400/50 border-x-2 border-orange-300 ring-2 ring-orange-400/80 z-20' : 'bg-orange-400/25 hover:bg-orange-400/40 border-x border-orange-400/70 z-10') +
+          ' cursor-pointer pointer-events-auto transition-all';
         band.style.left = (sp.start / d) * 100 + '%';
-        band.style.width = Math.max(0.3, ((sp.end - sp.start) / d) * 100) + '%';
+        band.style.width = Math.max(0.6, ((sp.end - sp.start) / d) * 100) + '%';
+        band.title = `🔥 Chat Spike: ${fmtTime(sp.start)} - ${fmtTime(sp.end)} (${sp.rate}/s) · Click to preview`;
+        const onSpikeClick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          selectSpike(i);
+        };
+        band.addEventListener('pointerdown', onSpikeClick);
+        band.addEventListener('click', onSpikeClick);
         box.appendChild(band);
       }
     }
 
-    // Click a spike: select it, with a lead-in because chat reacts a few seconds after the moment
+    // Click a spike: select it, frame the moment with lead-in, and move preview to that section
     function selectSpike(i) {
       const sp = chat.spikes[i];
       if (!sp || manual.duration <= 0) return;
-      const end = Math.min(manual.duration, sp.end + 3);
+      chat.activeSpike = i;
+      manual.endAtLive = false;
+      const end = Math.min(manual.duration, sp.end + 5);
       const start = Math.max(0, Math.max(sp.start - 25, end - MAX_CLIP));
-      applySelection(start, end, 'end');
+      applySelection(start, end, 'spike');
+      manual.endAtLive = false;
       seekManual(manual.start);
+      previewSelection();
+      applyChat(chat);
     }
 
     window.addEventListener('resize', renderChat);
@@ -1301,17 +1350,22 @@
     function setLength(n) {
       const d = manual.duration;
       if (d <= 0) { showToast('Load a video or stream first.', 'error'); return; }
+      manual.endAtLive = false;
       n = Math.min(n, d);
       const start = Math.min(manual.start, d - n);
-      applySelection(Math.max(0, start), Math.max(0, start) + n, 'end');
+      applySelection(Math.max(0, start), Math.max(0, start) + n, 'both');
+      manual.endAtLive = false;
       seekManual(manual.start);
+      previewSelection();
     }
 
     function clipLastSeconds(n) {
       const d = manual.duration;
       if (d <= 0) { showToast('Load a video or stream first.', 'error'); return; }
       applySelection(Math.max(0, d - n), d, 'end');
+      manual.endAtLive = true;
       seekManual(manual.start);
+      previewSelection();
     }
 
     // Jump to the previous / next chat spike and select it
@@ -1322,6 +1376,7 @@
       if (dir > 0) idx = chat.spikes.findIndex(sp => sp.start - 25 > t + 1);
       else for (let i = chat.spikes.length - 1; i >= 0; i--) if (chat.spikes[i].start - 25 < t - 1) { idx = i; break; }
       if (idx < 0) { showToast(dir > 0 ? 'No later spike.' : 'No earlier spike.', 'info'); return; }
+      beep();
       selectSpike(idx);
     }
 
