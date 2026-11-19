@@ -639,30 +639,6 @@ def _start_index(durs: list, backfill: str) -> Optional[int]:
 
 def _capture_youtube(sess: LiveSession):
     state.append_log(f"[LIVE] Resolving YouTube stream: {sess.url}")
-
-    # When requesting the full stream from the beginning ("start"), use yt-dlp --live-from-start.
-    # YouTube's live HLS playlist is an Apple-spec sliding window capped at ~12-15 minutes,
-    # whereas yt-dlp --live-from-start fetches the full DASH broadcast from minute 0:00 (up to 12+ hours).
-    if sess.backfill == "start":
-        sess.note = "Starting recording from the beginning of the broadcast (fetching past footage)..."
-        state.append_log("[LIVE] Capturing stream from start via yt-dlp --live-from-start...")
-        p1 = subprocess.Popen(
-            [sys.executable, "-m", "yt_dlp", "--live-from-start", "--no-warnings", "--no-playlist",
-             "-f", "bestvideo[vcodec^=avc][height<=1080]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080]+bestaudio/best",
-             "-o", "-", sess.url],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW
-        )
-        p2 = subprocess.Popen(
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-i", "pipe:0", "-c:v", "copy", "-c:a", "aac"] + HLS_OUT,
-            stdin=p1.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            cwd=str(sess.dir), creationflags=CREATE_NO_WINDOW
-        )
-        p1.stdout.close()
-        sess.procs = [p1, p2]
-        threading.Thread(target=_pump, args=(p1.stderr, "yt-dlp"), daemon=True).start()
-        threading.Thread(target=_pump, args=(p2.stderr, "ffmpeg"), daemon=True).start()
-        return
-
     res = subprocess.run(
         [sys.executable, "-m", "yt_dlp", "-g", "--no-warnings", "--no-playlist",
          "-f", "bv*[protocol^=m3u8][height<=1080]+ba[protocol^=m3u8]/b[protocol^=m3u8]/bv*[height<=1080]+ba/best[height<=1080]/best", sess.url],
@@ -676,7 +652,7 @@ def _capture_youtube(sess: LiveSession):
     base = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning"]
     reconnect = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
 
-    if len(urls) >= 2:   # YouTube serves video and audio as separate HLS feeds; keep them in sync from the same start index
+    if len(urls) >= 2:   # YouTube serves video and audio as separate feeds; keep both synchronized with full audio
         idx = None
         if sess.backfill != "now":
             try:
@@ -684,9 +660,9 @@ def _capture_youtube(sess: LiveSession):
                 idx = _start_index(durs, sess.backfill)
                 if durs and idx is not None:
                     backfill_s = sum(list(reversed(durs))[:abs(idx)])
-                    sess.note = (f"Backfilling {fmt_hms(backfill_s)} of stream history. "
+                    sess.note = (f"Backfilling {fmt_hms(backfill_s)} of stream history with full audio. "
                                  f"Downloading backlog to catch up with live...")
-                    state.append_log(f"[LIVE] Backfilling: seeking {abs(idx)} segments (~{fmt_hms(backfill_s)}) back from live edge.")
+                    state.append_log(f"[LIVE] Backfilling: seeking {abs(idx)} segments (~{fmt_hms(backfill_s)}) back with full audio.")
             except Exception as e:
                 state.append_log(f"[LIVE] Could not read stream history ({e}); starting from the live edge.")
         start_opt = ["-live_start_index", str(idx)] if idx is not None else []
@@ -708,7 +684,7 @@ def _capture_youtube(sess: LiveSession):
         start_opt = ["-live_start_index", str(idx)] if idx is not None else []
         cmd = base + reconnect + start_opt + ["-i", urls[0], "-c", "copy"] + HLS_OUT
 
-    state.append_log("[LIVE] Starting recorder...")
+    state.append_log("[LIVE] Starting recorder with full audio & video...")
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             cwd=str(sess.dir), creationflags=CREATE_NO_WINDOW)
     sess.procs = [proc]
